@@ -57,7 +57,7 @@
 #define FSM_PEER_TRANSITIONED   3
 
 /* Prototypes. */
-extern void bgp_fsm_nht_update(struct peer *, int valid);
+extern void bgp_fsm_event_update(struct peer *peer, int valid);
 extern int bgp_event(struct thread *);
 extern int bgp_event_update(struct peer *, int event);
 extern int bgp_stop(struct peer *peer);
@@ -88,6 +88,5 @@ extern void bgp_adjust_routeadv(struct peer *);
 
 #include "hook.h"
 DECLARE_HOOK(peer_backward_transition, (struct peer * peer), (peer))
-DECLARE_HOOK(peer_established, (struct peer * peer), (peer))
 
 #endif /* _QUAGGA_BGP_FSM_H */

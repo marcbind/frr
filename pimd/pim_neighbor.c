@@ -424,9 +424,10 @@ struct pim_neighbor *pim_neighbor_find_by_secondary(struct interface *ifp,
 	struct pim_neighbor *neigh;
 	struct prefix *p;
 
-	pim_ifp = ifp->info;
-	if (!pim_ifp)
+	if (!ifp || !ifp->info)
 		return NULL;
+
+	pim_ifp = ifp->info;
 
 	for (ALL_LIST_ELEMENTS_RO(pim_ifp->pim_neighbor_list, node, neigh)) {
 		for (ALL_LIST_ELEMENTS_RO(neigh->prefix_list, pnode, p)) {
@@ -540,7 +541,7 @@ pim_neighbor_add(struct interface *ifp, struct in_addr source_addr,
 	   Upon PIM neighbor UP, iterate all RPs and update
 	   nexthop cache with this neighbor.
 	 */
-	pim_resolve_rp_nh(pim_ifp->pim);
+	pim_resolve_rp_nh(pim_ifp->pim, neigh);
 
 	pim_rp_setup(pim_ifp->pim);
 

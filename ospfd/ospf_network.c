@@ -190,7 +190,7 @@ int ospf_sock_init(struct ospf *ospf)
 		/* silently return since VRF is not ready */
 		return -1;
 	}
-	frr_elevate_privs(&ospfd_privs) {
+	frr_with_privs(&ospfd_privs) {
 		ospf_sock = vrf_socket(AF_INET, SOCK_RAW, IPPROTO_OSPFIGP,
 				       ospf->vrf_id, ospf->name);
 		if (ospf_sock < 0) {
@@ -234,10 +234,10 @@ int ospf_sock_init(struct ospf *ospf)
 			flog_err(EC_LIB_SOCKET,
 				 "Can't set pktinfo option for fd %d",
 				 ospf_sock);
-
-		setsockopt_so_sendbuf(ospf_sock, bufsize);
-		setsockopt_so_recvbuf(ospf_sock, bufsize);
 	}
+
+	setsockopt_so_sendbuf(ospf_sock, bufsize);
+	setsockopt_so_recvbuf(ospf_sock, bufsize);
 
 	ospf->fd = ospf_sock;
 	return ret;

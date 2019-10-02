@@ -1,9 +1,10 @@
+.. _building-centos6:
+
 CentOS 6
 ========================================
 
-(As an alternative to this installation, you may prefer to create a FRR
-rpm package yourself and install that package instead. See instructions
-in redhat/README.rpm\_build.md on how to build a rpm package)
+This document describes installation from source. If you want to build an RPM,
+see :ref:`packaging-redhat`.
 
 Instructions are tested with ``CentOS 6.8`` on ``x86_64`` platform
 
@@ -24,7 +25,7 @@ CentOS 6 restrictions:
    PIMd is needed
 -  MPLS is not supported on ``CentOS 6``. MPLS requires Linux Kernel 4.5
    or higher (LDP can be built, but may have limited use without MPLS)
--  Zebra is unable to detect what bridge/vrf an interface is associcated
+-  Zebra is unable to detect what bridge/vrf an interface is associated
    with (IFLA\_INFO\_SLAVE\_KIND does not exist in the kernel headers,
    you can use a newer kernel + headers to get this functionality)
 -  frr\_reload.py will not work, as this requires Python 2.7, and CentOS
@@ -42,9 +43,9 @@ Add packages:
 
 .. code-block:: shell
 
-   sudo yum install git autoconf automake libtool make gawk \
+   sudo yum install git autoconf automake libtool make \
       readline-devel texinfo net-snmp-devel groff pkgconfig \
-      json-c-devel pam-devel flex epel-release c-ares-devel
+      json-c-devel pam-devel flex epel-release c-ares-devel libcap-devel
 
 Install newer version of bison (CentOS 6 package source is too old) from CentOS
 7:
@@ -162,10 +163,9 @@ an example.)
         --disable-ldpd \
         --enable-fpm \
         --with-pkg-git-version \
-        --with-pkg-extra-version=-MyOwnFRRVersion \
-        SPHINXBUILD=sphinx-build2.7
+        --with-pkg-extra-version=-MyOwnFRRVersion
     make
-    make check PYTHON=/usr/bin/python2.7
+    make check
     sudo make install
 
 Create empty FRR configuration files
@@ -235,7 +235,7 @@ settings)::
    # Controls source route verification
    net.ipv4.conf.default.rp_filter = 0
 
-Load the modifed sysctl's on the system:
+Load the modified sysctl's on the system:
 
 .. code-block:: shell
 

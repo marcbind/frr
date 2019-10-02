@@ -25,6 +25,7 @@
 #define _ZEBRA_VXLAN_H
 
 #include <zebra.h>
+#include <zebra/zebra_router.h>
 
 #include "linklist.h"
 #include "if.h"
@@ -34,20 +35,25 @@
 #include "lib/json.h"
 #include "zebra/zebra_vrf.h"
 #include "zebra/zserv.h"
+#include "zebra/zebra_dplane.h"
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /* Is EVPN enabled? */
 #define EVPN_ENABLED(zvrf)  (zvrf)->advertise_all_vni
 static inline int is_evpn_enabled(void)
 {
 	struct zebra_vrf *zvrf = NULL;
-	zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
-	return zvrf ? zvrf->advertise_all_vni : 0;
+	zvrf = zebra_vrf_get_evpn();
+	return zvrf ? EVPN_ENABLED(zvrf) : 0;
 }
 
 static inline int
 is_vxlan_flooding_head_end(void)
 {
-	struct zebra_vrf *zvrf = zebra_vrf_lookup_by_id(VRF_DEFAULT);
+	struct zebra_vrf *zvrf = zebra_vrf_get_evpn();
 
 	if (!zvrf)
 		return 0;
@@ -55,9 +61,11 @@ is_vxlan_flooding_head_end(void)
 }
 
 /* VxLAN interface change flags of interest. */
-#define ZEBRA_VXLIF_LOCAL_IP_CHANGE     0x1
-#define ZEBRA_VXLIF_MASTER_CHANGE       0x2
-#define ZEBRA_VXLIF_VLAN_CHANGE         0x4
+#define ZEBRA_VXLIF_LOCAL_IP_CHANGE     (1 << 0)
+#define ZEBRA_VXLIF_MASTER_CHANGE       (1 << 1)
+#define ZEBRA_VXLIF_VLAN_CHANGE         (1 << 2)
+#define ZEBRA_VXLIF_MCAST_GRP_CHANGE    (1 << 3)
+
 
 #define VNI_STR_LEN 32
 
@@ -72,6 +80,7 @@ extern void zebra_vxlan_advertise_svi_macip(ZAPI_HANDLER_ARGS);
 extern void zebra_vxlan_advertise_gw_macip(ZAPI_HANDLER_ARGS);
 extern void zebra_vxlan_advertise_all_vni(ZAPI_HANDLER_ARGS);
 extern void zebra_vxlan_dup_addr_detection(ZAPI_HANDLER_ARGS);
+extern void zebra_vxlan_sg_replay(ZAPI_HANDLER_ARGS);
 
 extern int is_l3vni_for_prefix_routes_only(vni_t vni);
 extern ifindex_t get_l3vni_svi_ifindex(vrf_id_t vrf_id);
@@ -205,5 +214,12 @@ extern int zebra_vxlan_clear_dup_detect_vni_all(struct vty *vty,
 extern int zebra_vxlan_clear_dup_detect_vni(struct vty *vty,
 					    struct zebra_vrf *zvrf,
 					    vni_t vni);
+extern void zebra_vxlan_handle_result(struct zebra_dplane_ctx *ctx);
+
+extern void zebra_evpn_init(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* _ZEBRA_VXLAN_H */

@@ -289,12 +289,8 @@ struct vty_arg {
 #define IS_DIRECTORY_SEP(c) ((c) == DIRECTORY_SEP)
 #endif
 
-/* Exported variables */
-extern char integrate_default[];
-extern struct vty *vty_exclusive_lock;
-
 /* Prototypes. */
-extern void vty_init(struct thread_master *);
+extern void vty_init(struct thread_master *, bool do_command_logging);
 extern void vty_init_vtysh(void);
 extern void vty_terminate(void);
 extern void vty_reset(void);
@@ -306,8 +302,8 @@ extern struct vty *vty_stdio(void (*atclose)(int isexit));
  * - vty_endframe() clears the buffer without printing it, and prints an
  *   extra string if the buffer was empty before (for context-end markers)
  */
-extern int vty_out(struct vty *, const char *, ...) PRINTF_ATTRIBUTE(2, 3);
-extern void vty_frame(struct vty *, const char *, ...) PRINTF_ATTRIBUTE(2, 3);
+extern int vty_out(struct vty *, const char *, ...) PRINTFRR(2, 3);
+extern void vty_frame(struct vty *, const char *, ...) PRINTFRR(2, 3);
 extern void vty_endframe(struct vty *, const char *);
 bool vty_set_include(struct vty *vty, const char *regexp);
 
@@ -317,13 +313,11 @@ extern void vty_time_print(struct vty *, int);
 extern void vty_serv_sock(const char *, unsigned short, const char *);
 extern void vty_close(struct vty *);
 extern char *vty_get_cwd(void);
-extern void vty_log(const char *level, const char *proto, const char *fmt,
-		    struct timestamp_control *, va_list);
+extern void vty_log(const char *level, const char *proto, const char *msg,
+		    struct timestamp_control *);
 extern int vty_config_enter(struct vty *vty, bool private_config,
 			    bool exclusive);
 extern void vty_config_exit(struct vty *);
-extern int vty_config_exclusive_lock(struct vty *vty);
-extern void vty_config_exclusive_unlock(struct vty *vty);
 extern int vty_shell(struct vty *);
 extern int vty_shell_serv(struct vty *);
 extern void vty_hello(struct vty *);

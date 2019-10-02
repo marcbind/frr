@@ -26,6 +26,10 @@
 
 #include "zebra/zebra_ns.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 /*
  * This header file contains the idea of a router and as such
  * owns data that is associated with a router from zebra's
@@ -45,6 +49,17 @@ struct zebra_router_table {
 RB_HEAD(zebra_router_table_head, zebra_router_table);
 RB_PROTOTYPE(zebra_router_table_head, zebra_router_table,
 	     zebra_router_table_entry, zebra_router_table_entry_compare)
+
+/* RPF lookup behaviour */
+enum multicast_mode {
+	MCAST_NO_CONFIG = 0,  /* MIX_MRIB_FIRST, but no show in config write */
+	MCAST_MRIB_ONLY,      /* MRIB only */
+	MCAST_URIB_ONLY,      /* URIB only */
+	MCAST_MIX_MRIB_FIRST, /* MRIB, if nothing at all then URIB */
+	MCAST_MIX_DISTANCE,   /* MRIB & URIB, lower distance wins */
+	MCAST_MIX_PFXLEN,     /* MRIB & URIB, longer prefix wins */
+			      /* on equal value, MRIB wins for last 2 */
+};
 
 struct zebra_mlag_info {
 	/* Role this zebra router is playing */
@@ -78,15 +93,11 @@ struct zebra_router {
 
 	struct hash *iptable_hash;
 
-#if defined(HAVE_RTADV)
-	struct rtadv rtadv;
-#endif /* HAVE_RTADV */
+	/* used if vrf backend is not network namespace */
+	int rtadv_sock;
 
 	/* A sequence number used for tracking routes */
 	_Atomic uint32_t sequence_num;
-
-	/* The default table used for this router */
-	uint32_t rtm_table_default;
 
 	/* rib work queue */
 #define ZEBRA_RIB_PROCESS_HOLD_TIME 10
@@ -104,7 +115,24 @@ struct zebra_router {
 
 	/* Mlag information for the router */
 	struct zebra_mlag_info mlag_info;
+
+	/*
+	 * The EVPN instance, if any
+	 */
+	struct zebra_vrf *evpn_vrf;
+
+	uint32_t multipath_num;
+
+	/* RPF Lookup behavior */
+	enum multicast_mode ipv4_multicast_mode;
+
+	/*
+	 * Time for when we sweep the rib from old routes
+	 */
+	time_t startup_time;
 };
+
+#define GRACEFUL_RESTART_TIME 60
 
 extern struct zebra_router zrouter;
 
@@ -117,14 +145,33 @@ extern struct route_table *zebra_router_find_table(struct zebra_vrf *zvrf,
 extern struct route_table *zebra_router_get_table(struct zebra_vrf *zvrf,
 						  uint32_t tableid, afi_t afi,
 						  safi_t safi);
+extern void zebra_router_release_table(struct zebra_vrf *zvrf, uint32_t tableid,
+				       afi_t afi, safi_t safi);
 
 extern int zebra_router_config_write(struct vty *vty);
 
-extern unsigned long zebra_router_score_proto(uint8_t proto,
-					      unsigned short instance);
 extern void zebra_router_sweep_route(void);
 
 extern void zebra_router_show_table_summary(struct vty *vty);
 
 extern uint32_t zebra_router_get_next_sequence(void);
+
+static inline vrf_id_t zebra_vrf_get_evpn_id(void)
+{
+	return zrouter.evpn_vrf ? zvrf_id(zrouter.evpn_vrf) : VRF_DEFAULT;
+}
+static inline struct zebra_vrf *zebra_vrf_get_evpn(void)
+{
+	return zrouter.evpn_vrf ? zrouter.evpn_vrf
+			        : zebra_vrf_lookup_by_id(VRF_DEFAULT);
+}
+
+extern void multicast_mode_ipv4_set(enum multicast_mode mode);
+
+extern enum multicast_mode multicast_mode_ipv4_get(void);
+
+#ifdef __cplusplus
+}
+#endif
+
 #endif

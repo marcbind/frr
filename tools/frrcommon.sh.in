@@ -29,7 +29,7 @@ FRR_VTY_GROUP="@enable_vty_group@" # frrvty
 # - keep zebra first
 # - watchfrr does NOT belong in this list
 
-DAEMONS="zebra bgpd ripd ripngd ospfd ospf6d isisd babeld pimd ldpd nhrpd eigrpd sharpd pbrd staticd bfdd fabricd"
+DAEMONS="zebra bgpd ripd ripngd ospfd ospf6d isisd babeld pimd ldpd nhrpd eigrpd sharpd pbrd staticd bfdd fabricd vrrpd"
 RELOAD_SCRIPT="$D_PATH/frr-reload.py"
 
 #
@@ -291,7 +291,7 @@ load_old_config "$C_PATH/daemons.conf"
 load_old_config "/etc/default/frr"
 load_old_config "/etc/sysconfig/frr"
 
-if declare -p watchfrr_options | grep -q '^declare \-a'; then
+if { declare -p watchfrr_options 2>/dev/null || true; } | grep -q '^declare \-a'; then
 	log_warning_msg "watchfrr_options contains a bash array value." \
 		"The configured value is intentionally ignored since it is likely wrong." \
 		"Please remove or fix the setting."

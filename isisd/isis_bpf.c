@@ -34,7 +34,6 @@
 #include "if.h"
 #include "lib_errors.h"
 
-#include "isisd/dict.h"
 #include "isisd/isis_constants.h"
 #include "isisd/isis_common.h"
 #include "isisd/isis_circuit.h"
@@ -188,7 +187,7 @@ int isis_sock_init(struct isis_circuit *circuit)
 {
 	int retval = ISIS_OK;
 
-	frr_elevate_privs(&isisd_privs) {
+	frr_with_privs(&isisd_privs) {
 
 		retval = open_bpf_dev(circuit);
 

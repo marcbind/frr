@@ -321,6 +321,15 @@ union prefixconstptr {
 /* Maximum string length of the result of prefix2str */
 #define PREFIX_STRLEN 80
 
+/*
+ * Longest possible length of a (S,G) string is 36 bytes
+ * 123.123.123.123 = 15 * 2
+ * (,) = 3
+ * NULL Character at end = 1
+ * (123.123.123.123,123.123.123.123)
+ */
+#define PREFIX_SG_STR_LEN 34
+
 /* Max bit/byte length of IPv4 address. */
 #define IPV4_MAX_BYTELEN    4
 #define IPV4_MAX_BITLEN    32
@@ -394,15 +403,26 @@ extern int str2prefix(const char *, struct prefix *);
 
 #define PREFIX2STR_BUFFER  PREFIX_STRLEN
 
+extern void prefix_mcast_inet4_dump(const char *onfail, struct in_addr addr,
+				char *buf, int buf_size);
+extern const char *prefix_sg2str(const struct prefix_sg *sg, char *str);
 extern const char *prefix2str(union prefixconstptr, char *, int);
 extern int prefix_match(const struct prefix *, const struct prefix *);
 extern int prefix_match_network_statement(const struct prefix *,
 					  const struct prefix *);
-extern int prefix_same(const struct prefix *, const struct prefix *);
-extern int prefix_cmp(const struct prefix *, const struct prefix *);
+extern int prefix_same(union prefixconstptr, union prefixconstptr);
+extern int prefix_cmp(union prefixconstptr, union prefixconstptr);
 extern int prefix_common_bits(const struct prefix *, const struct prefix *);
-extern void prefix_copy(struct prefix *dest, const struct prefix *src);
+extern void prefix_copy(union prefixptr, union prefixconstptr);
 extern void apply_mask(struct prefix *);
+
+#ifdef __clang_analyzer__
+/* clang-SA doesn't understand transparent unions, making it think that the
+ * target of prefix_copy is uninitialized.  So just memset the target.
+ * cf. https://bugs.llvm.org/show_bug.cgi?id=42811
+ */
+#define prefix_copy(a, b) ({ memset(a, 0, sizeof(*a)); prefix_copy(a, b); })
+#endif
 
 extern struct prefix *sockunion2prefix(const union sockunion *dest,
 				       const union sockunion *mask);
@@ -450,11 +470,11 @@ extern void masklen2ip6(const int, struct in6_addr *);
 
 extern const char *inet6_ntoa(struct in6_addr);
 
-extern int is_zero_mac(struct ethaddr *mac);
+extern int is_zero_mac(const struct ethaddr *mac);
 extern int prefix_str2mac(const char *str, struct ethaddr *mac);
 extern char *prefix_mac2str(const struct ethaddr *mac, char *buf, int size);
 
-extern unsigned prefix_hash_key(void *pp);
+extern unsigned prefix_hash_key(const void *pp);
 
 extern int str_to_esi(const char *str, esi_t *esi);
 extern char *esi_to_str(const esi_t *esi, char *buf, int size);
@@ -508,6 +528,19 @@ static inline int is_host_route(struct prefix *p)
 		return (p->prefixlen == IPV4_MAX_BITLEN);
 	else if (p->family == AF_INET6)
 		return (p->prefixlen == IPV6_MAX_BITLEN);
+	return 0;
+}
+
+static inline int is_default_host_route(struct prefix *p)
+{
+	if (p->family == AF_INET) {
+		return (p->u.prefix4.s_addr == INADDR_ANY &&
+			p->prefixlen == IPV4_MAX_BITLEN);
+	} else if (p->family == AF_INET6) {
+		return ((!memcmp(&p->u.prefix6, &in6addr_any,
+				 sizeof(struct in6_addr))) &&
+			p->prefixlen == IPV6_MAX_BITLEN);
+	}
 	return 0;
 }
 

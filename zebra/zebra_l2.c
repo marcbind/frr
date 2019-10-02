@@ -99,15 +99,18 @@ void zebra_l2_unmap_slave_from_bridge(struct zebra_l2info_brslave *br_slave)
 	br_slave->br_if = NULL;
 }
 
-void zebra_l2_map_slave_to_bond(struct zebra_l2info_bondslave *bond_slave)
+void zebra_l2_map_slave_to_bond(struct zebra_l2info_bondslave *bond_slave,
+				vrf_id_t vrf_id)
 {
 	struct interface *bond_if;
 
 	/* TODO: Handle change of master */
-	bond_if = if_lookup_by_index_per_ns(zebra_ns_lookup(NS_DEFAULT),
-					    bond_slave->bond_ifindex);
+	bond_if = if_lookup_by_index_all_vrf(bond_slave->bond_ifindex);
 	if (bond_if)
 		bond_slave->bond_if = bond_if;
+	else
+		bond_slave->bond_if = if_create_ifindex(bond_slave->bond_ifindex,
+							vrf_id);
 }
 
 void zebra_l2_unmap_slave_from_bond(struct zebra_l2info_bondslave *bond_slave)
@@ -172,6 +175,7 @@ void zebra_l2_vxlanif_add_update(struct interface *ifp,
 {
 	struct zebra_if *zif;
 	struct in_addr old_vtep_ip;
+	uint16_t chgflags = 0;
 
 	zif = ifp->info;
 	assert(zif);
@@ -183,11 +187,20 @@ void zebra_l2_vxlanif_add_update(struct interface *ifp,
 	}
 
 	old_vtep_ip = zif->l2info.vxl.vtep_ip;
-	if (IPV4_ADDR_SAME(&old_vtep_ip, &vxlan_info->vtep_ip))
-		return;
 
-	zif->l2info.vxl.vtep_ip = vxlan_info->vtep_ip;
-	zebra_vxlan_if_update(ifp, ZEBRA_VXLIF_LOCAL_IP_CHANGE);
+	if (!IPV4_ADDR_SAME(&old_vtep_ip, &vxlan_info->vtep_ip)) {
+		chgflags |= ZEBRA_VXLIF_LOCAL_IP_CHANGE;
+		zif->l2info.vxl.vtep_ip = vxlan_info->vtep_ip;
+	}
+
+	if (!IPV4_ADDR_SAME(&zif->l2info.vxl.mcast_grp,
+				&vxlan_info->mcast_grp)) {
+		chgflags |= ZEBRA_VXLIF_MCAST_GRP_CHANGE;
+		zif->l2info.vxl.mcast_grp = vxlan_info->mcast_grp;
+	}
+
+	if (chgflags)
+		zebra_vxlan_if_update(ifp, chgflags);
 }
 
 /*
@@ -272,7 +285,7 @@ void zebra_l2if_update_bond_slave(struct interface *ifp, ifindex_t bond_ifindex)
 
 	/* Set up or remove link with master */
 	if (bond_ifindex != IFINDEX_INTERNAL)
-		zebra_l2_map_slave_to_bond(&zif->bondslave_info);
+		zebra_l2_map_slave_to_bond(&zif->bondslave_info, ifp->vrf_id);
 	else if (old_bond_ifindex != IFINDEX_INTERNAL)
 		zebra_l2_unmap_slave_from_bond(&zif->bondslave_info);
 }

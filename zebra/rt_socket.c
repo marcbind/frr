@@ -304,33 +304,41 @@ static int kernel_rtm(int cmd, const struct prefix *p,
 enum zebra_dplane_result kernel_route_update(struct zebra_dplane_ctx *ctx)
 {
 	enum zebra_dplane_result res = ZEBRA_DPLANE_REQUEST_SUCCESS;
+	uint32_t type, old_type;
 
 	if (dplane_ctx_get_src(ctx) != NULL) {
 		zlog_err("route add: IPv6 sourcedest routes unsupported!");
 		return ZEBRA_DPLANE_REQUEST_FAILURE;
 	}
 
-	frr_elevate_privs(&zserv_privs) {
+	type = dplane_ctx_get_type(ctx);
+	old_type = dplane_ctx_get_old_type(ctx);
 
-		if (dplane_ctx_get_op(ctx) == DPLANE_OP_ROUTE_DELETE)
-			kernel_rtm(RTM_DELETE, dplane_ctx_get_dest(ctx),
-				   dplane_ctx_get_ng(ctx),
-				   dplane_ctx_get_metric(ctx));
-		else if (dplane_ctx_get_op(ctx) == DPLANE_OP_ROUTE_INSTALL)
-			kernel_rtm(RTM_ADD, dplane_ctx_get_dest(ctx),
-				   dplane_ctx_get_ng(ctx),
-				   dplane_ctx_get_metric(ctx));
-		else if (dplane_ctx_get_op(ctx) == DPLANE_OP_ROUTE_UPDATE) {
+	frr_with_privs(&zserv_privs) {
+
+		if (dplane_ctx_get_op(ctx) == DPLANE_OP_ROUTE_DELETE) {
+			if (!RSYSTEM_ROUTE(type))
+				kernel_rtm(RTM_DELETE, dplane_ctx_get_dest(ctx),
+					   dplane_ctx_get_ng(ctx),
+					   dplane_ctx_get_metric(ctx));
+		} else if (dplane_ctx_get_op(ctx) == DPLANE_OP_ROUTE_INSTALL) {
+			if (!RSYSTEM_ROUTE(type))
+				kernel_rtm(RTM_ADD, dplane_ctx_get_dest(ctx),
+					   dplane_ctx_get_ng(ctx),
+					   dplane_ctx_get_metric(ctx));
+		} else if (dplane_ctx_get_op(ctx) == DPLANE_OP_ROUTE_UPDATE) {
 			/* Must do delete and add separately -
 			 * no update available
 			 */
-			kernel_rtm(RTM_DELETE, dplane_ctx_get_dest(ctx),
-				   dplane_ctx_get_old_ng(ctx),
-				   dplane_ctx_get_old_metric(ctx));
+			if (!RSYSTEM_ROUTE(old_type))
+				kernel_rtm(RTM_DELETE, dplane_ctx_get_dest(ctx),
+					   dplane_ctx_get_old_ng(ctx),
+					   dplane_ctx_get_old_metric(ctx));
 
-			kernel_rtm(RTM_ADD, dplane_ctx_get_dest(ctx),
-				   dplane_ctx_get_ng(ctx),
-				   dplane_ctx_get_metric(ctx));
+			if (!RSYSTEM_ROUTE(type))
+				kernel_rtm(RTM_ADD, dplane_ctx_get_dest(ctx),
+					   dplane_ctx_get_ng(ctx),
+					   dplane_ctx_get_metric(ctx));
 		} else {
 			zlog_err("Invalid routing socket update op %s (%u)",
 				 dplane_op2str(dplane_ctx_get_op(ctx)),
@@ -338,6 +346,20 @@ enum zebra_dplane_result kernel_route_update(struct zebra_dplane_ctx *ctx)
 			res = ZEBRA_DPLANE_REQUEST_FAILURE;
 		}
 	} /* Elevated privs */
+
+	if (RSYSTEM_ROUTE(type)
+	    && dplane_ctx_get_op(ctx) != DPLANE_OP_ROUTE_DELETE) {
+		struct nexthop *nexthop;
+
+		for (ALL_NEXTHOPS_PTR(dplane_ctx_get_ng(ctx), nexthop)) {
+			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_RECURSIVE))
+				continue;
+
+			if (CHECK_FLAG(nexthop->flags, NEXTHOP_FLAG_ACTIVE)) {
+				SET_FLAG(nexthop->flags, NEXTHOP_FLAG_FIB);
+			}
+		}
+	}
 
 	return res;
 }
@@ -349,42 +371,23 @@ int kernel_neigh_update(int add, int ifindex, uint32_t addr, char *lla,
 	return 0;
 }
 
+/* NYI on routing-socket platforms, but we've always returned 'success'... */
+enum zebra_dplane_result kernel_neigh_update_ctx(struct zebra_dplane_ctx *ctx)
+{
+	return ZEBRA_DPLANE_REQUEST_SUCCESS;
+}
+
 extern int kernel_get_ipmr_sg_stats(struct zebra_vrf *zvrf, void *mroute)
 {
 	return 0;
 }
 
-int kernel_add_vtep(vni_t vni, struct interface *ifp, struct in_addr *vtep_ip)
+/*
+ * Update MAC, using dataplane context object. No-op here for now.
+ */
+enum zebra_dplane_result kernel_mac_update_ctx(struct zebra_dplane_ctx *ctx)
 {
-	return 0;
-}
-
-int kernel_del_vtep(vni_t vni, struct interface *ifp, struct in_addr *vtep_ip)
-{
-	return 0;
-}
-
-int kernel_add_mac(struct interface *ifp, vlanid_t vid, struct ethaddr *mac,
-		   struct in_addr vtep_ip, bool sticky)
-{
-	return 0;
-}
-
-int kernel_del_mac(struct interface *ifp, vlanid_t vid, struct ethaddr *mac,
-		   struct in_addr vtep_ip)
-{
-	return 0;
-}
-
-int kernel_add_neigh(struct interface *ifp, struct ipaddr *ip,
-		     struct ethaddr *mac, uint8_t flags)
-{
-	return 0;
-}
-
-int kernel_del_neigh(struct interface *ifp, struct ipaddr *ip)
-{
-	return 0;
+	return ZEBRA_DPLANE_REQUEST_SUCCESS;
 }
 
 extern int kernel_interface_set_master(struct interface *master,
@@ -393,7 +396,7 @@ extern int kernel_interface_set_master(struct interface *master,
 	return 0;
 }
 
-uint32_t kernel_get_speed(struct interface *ifp)
+uint32_t kernel_get_speed(struct interface *ifp, int *error)
 {
 	return ifp->speed;
 }

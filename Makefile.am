@@ -12,7 +12,9 @@ AM_CFLAGS = \
 	# end
 AM_CPPFLAGS = \
 	-I$(top_srcdir) -I$(top_srcdir)/include -I$(top_srcdir)/lib \
-	-I$(top_builddir) -I$(top_builddir)/include -I$(top_builddir)/lib
+	-I$(top_builddir) -I$(top_builddir)/include -I$(top_builddir)/lib \
+	$(LUA_INCLUDE) \
+	# end
 AM_LDFLAGS = \
 	-export-dynamic \
 	$(AC_LDFLAGS) \
@@ -37,6 +39,12 @@ shvar-%:
 	@echo "$*=\"$($*)\"" >&$(VARFD)
 var-%:
 	@echo "$($*)" >&$(VARFD)
+
+if ONLY_CLIPPY
+.DEFAULT_GOAL := clippy-only
+endif
+clippy-only: Makefile lib/clippy config.h
+.PHONY: clippy-only
 
 # overwriting these vars breaks cross-compilation.  let's be helpful and warn.
 #
@@ -96,7 +104,6 @@ noinst_LIBRARIES =
 nodist_noinst_DATA =
 lib_LTLIBRARIES =
 module_LTLIBRARIES =
-libyang_plugins_LTLIBRARIES =
 pkginclude_HEADERS =
 nodist_pkginclude_HEADERS =
 dist_examples_DATA =
@@ -111,7 +118,6 @@ vtysh_scan =
 $(AUTOMAKE_DUMMY)install-moduleLTLIBRARIES: install-libLTLIBRARIES
 $(AUTOMAKE_DUMMY)install-binPROGRAMS: install-libLTLIBRARIES
 $(AUTOMAKE_DUMMY)install-sbinPROGRAMS: install-libLTLIBRARIES
-$(AUTOMAKE_DUMMY)install-libyang_pluginsLTLIBRARIES: install-libLTLIBRARIES
 
 include doc/subdir.am
 include doc/user/subdir.am
@@ -123,6 +129,7 @@ include zebra/subdir.am
 include watchfrr/subdir.am
 include qpb/subdir.am
 include fpm/subdir.am
+include grpc/subdir.am
 include tools/subdir.am
 include solaris/subdir.am
 
@@ -146,6 +153,7 @@ include staticd/subdir.am
 include bfdd/subdir.am
 include yang/subdir.am
 include yang/libyang_plugins/subdir.am
+include vrrpd/subdir.am
 
 include vtysh/subdir.am
 include tests/subdir.am
@@ -175,13 +183,9 @@ EXTRA_DIST += \
 	python/clidef.py \
 	python/clippy/__init__.py \
 	\
-	redhat/frr.init \
-	redhat/frr.service \
-	redhat/daemons \
 	redhat/frr.logrotate \
 	redhat/frr.pam \
 	redhat/frr.spec \
-	redhat/README.rpm_build.md \
 	\
 	snapcraft/snapcraft.yaml \
 	snapcraft/README.snap_build.md \
@@ -191,7 +195,6 @@ EXTRA_DIST += \
 	snapcraft/defaults \
 	snapcraft/helpers \
 	snapcraft/snap \
-	\
 	babeld/Makefile \
 	bgpd/Makefile \
 	bgpd/rfp-example/librfp/Makefile \
@@ -202,6 +205,7 @@ EXTRA_DIST += \
 	doc/user/Makefile \
 	eigrpd/Makefile \
 	fpm/Makefile \
+	grpc/Makefile \
 	isisd/Makefile \
 	ldpd/Makefile \
 	lib/Makefile \
@@ -211,7 +215,6 @@ EXTRA_DIST += \
 	ospfd/Makefile \
 	pbrd/Makefile \
 	pimd/Makefile \
-	ports/Makefile \
 	qpb/Makefile \
 	ripd/Makefile \
 	ripngd/Makefile \
@@ -221,6 +224,7 @@ EXTRA_DIST += \
 	vtysh/Makefile \
 	watchfrr/Makefile \
 	zebra/Makefile \
+	vrrpd/Makefile \
 	# end
 
 noinst_HEADERS += defaults.h

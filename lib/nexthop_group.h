@@ -42,10 +42,12 @@ struct nexthop_group {
 struct nexthop_group *nexthop_group_new(void);
 void nexthop_group_delete(struct nexthop_group **nhg);
 
-void nexthop_add(struct nexthop **target, struct nexthop *nexthop);
-void nexthop_del(struct nexthop_group *nhg, struct nexthop *nexthop);
-void copy_nexthops(struct nexthop **tnh, struct nexthop *nh,
+void nexthop_group_copy(struct nexthop_group *to,
+			struct nexthop_group *from);
+void copy_nexthops(struct nexthop **tnh, const struct nexthop *nh,
 		   struct nexthop *rparent);
+
+uint32_t nexthop_group_hash(const struct nexthop_group *nhg);
 
 /* The following for loop allows to iterate over the nexthop
  * structure of routes.
@@ -68,7 +70,7 @@ void copy_nexthops(struct nexthop **tnh, struct nexthop *nh,
 
 struct nexthop_hold {
 	char *nhvrf_name;
-	union sockunion addr;
+	union sockunion *addr;
 	char *intf;
 };
 
@@ -114,6 +116,11 @@ extern struct nexthop *nexthop_exists(struct nexthop_group *nhg,
 extern struct nexthop_group_cmd *nhgc_find(const char *name);
 
 extern void nexthop_group_write_nexthop(struct vty *vty, struct nexthop *nh);
+
+/* Return the number of nexthops in this nhg */
+extern uint8_t nexthop_group_nexthop_num(const struct nexthop_group *nhg);
+extern uint8_t
+nexthop_group_active_nexthop_num(const struct nexthop_group *nhg);
 
 #ifdef __cplusplus
 }

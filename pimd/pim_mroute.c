@@ -42,6 +42,7 @@
 #include "pim_zlookup.h"
 #include "pim_ssm.h"
 #include "pim_sock.h"
+#include "pim_vxlan.h"
 
 static void mroute_read_on(struct pim_instance *pim);
 
@@ -56,7 +57,7 @@ static int pim_mroute_set(struct pim_instance *pim, int enable)
 	 * We need to create the VRF table for the pim mroute_socket
 	 */
 	if (pim->vrf_id != VRF_DEFAULT) {
-		frr_elevate_privs(&pimd_privs) {
+		frr_with_privs(&pimd_privs) {
 
 			data = pim->vrf->data.l.table_id;
 			err = setsockopt(pim->mroute_socket, IPPROTO_IP,
@@ -74,7 +75,7 @@ static int pim_mroute_set(struct pim_instance *pim, int enable)
 		}
 	}
 
-	frr_elevate_privs(&pimd_privs) {
+	frr_with_privs(&pimd_privs) {
 		opt = enable ? MRT_INIT : MRT_DONE;
 		/*
 		 * *BSD *cares* about what value we pass down
@@ -189,8 +190,6 @@ static int pim_mroute_msg_nocache(int fd, struct interface *ifp,
 	sg.grp = msg->im_dst;
 
 	if (!(PIM_I_am_DR(pim_ifp))) {
-		struct channel_oil *c_oil;
-
 		if (PIM_DEBUG_MROUTE_DETAIL)
 			zlog_debug("%s: Interface is not the DR blackholing incoming traffic for %s",
 				   __PRETTY_FUNCTION__, pim_str_sg_dump(&sg));
@@ -200,24 +199,21 @@ static int pim_mroute_msg_nocache(int fd, struct interface *ifp,
 		 * Let's blackhole those packets for the moment
 		 * As that they will be coming up to the cpu
 		 * and causing us to consider them.
+		 *
+		 * This *will* create a dangling channel_oil
+		 * that I see no way to get rid of.  Just noting
+		 * this for future reference.
 		 */
-		c_oil = pim_channel_oil_add(pim_ifp->pim, &sg,
-					    pim_ifp->mroute_vif_index);
-		pim_mroute_add(c_oil, __PRETTY_FUNCTION__);
+		up = pim_upstream_find_or_add(
+			&sg, ifp, PIM_UPSTREAM_FLAG_MASK_SRC_NOCACHE,
+			__PRETTY_FUNCTION__);
+		pim_mroute_add(up->channel_oil, __PRETTY_FUNCTION__);
 
 		return 0;
 	}
 
 	up = pim_upstream_find_or_add(&sg, ifp, PIM_UPSTREAM_FLAG_MASK_FHR,
 				      __PRETTY_FUNCTION__);
-	if (!up) {
-		if (PIM_DEBUG_MROUTE) {
-			zlog_debug(
-				"%s: Failure to add upstream information for %s",
-				__PRETTY_FUNCTION__, pim_str_sg_dump(&sg));
-		}
-		return 0;
-	}
 
 	/*
 	 * I moved this debug till after the actual add because
@@ -234,12 +230,14 @@ static int pim_mroute_msg_nocache(int fd, struct interface *ifp,
 	up->channel_oil->cc.pktcnt++;
 	PIM_UPSTREAM_FLAG_SET_FHR(up->flags);
 	// resolve mfcc_parent prior to mroute_add in channel_add_oif
-	if (up->channel_oil->oil.mfcc_parent >= MAXVIFS) {
+	if (up->rpf.source_nexthop.interface &&
+	    up->channel_oil->oil.mfcc_parent >= MAXVIFS) {
 		int vif_index = 0;
 		vif_index = pim_if_find_vifindex_by_ifindex(
 			pim_ifp->pim,
 			up->rpf.source_nexthop.interface->ifindex);
-		up->channel_oil->oil.mfcc_parent = vif_index;
+		pim_channel_oil_change_iif(pim_ifp->pim, up->channel_oil,
+					   vif_index, __PRETTY_FUNCTION__);
 	}
 	pim_register_join(up);
 
@@ -298,6 +296,13 @@ static int pim_mroute_msg_wholepkt(int fd, struct interface *ifp,
 				"%s: Unable to find upstream channel WHOLEPKT%s",
 				__PRETTY_FUNCTION__, pim_str_sg_dump(&sg));
 		}
+		return 0;
+	}
+
+	if (!up->rpf.source_nexthop.interface) {
+		if (PIM_DEBUG_TRACE)
+			zlog_debug("%s: up %s RPF is not present",
+				__PRETTY_FUNCTION__, up->sg_str);
 		return 0;
 	}
 
@@ -447,7 +452,6 @@ static int pim_mroute_msg_wrvifwhole(int fd, struct interface *ifp,
 	struct pim_upstream *up;
 	struct prefix_sg star_g;
 	struct prefix_sg sg;
-	struct channel_oil *oil;
 
 	pim_ifp = ifp->info;
 
@@ -505,17 +509,13 @@ static int pim_mroute_msg_wrvifwhole(int fd, struct interface *ifp,
 		if (!PIM_UPSTREAM_FLAG_TEST_FHR(up->flags)) {
 			// No if channel, but upstream we are at the RP.
 			if (pim_nexthop_lookup(pim_ifp->pim, &source,
-					       up->upstream_register, 0)
-			    == 0) {
+					       up->upstream_register, 0)) {
 				pim_register_stop_send(source.interface, &sg,
 						       pim_ifp->primary_address,
 						       up->upstream_register);
 				up->sptbit = PIM_UPSTREAM_SPTBIT_TRUE;
 			}
-			if (!up->channel_oil)
-				up->channel_oil = pim_channel_oil_add(
-					pim_ifp->pim, &sg,
-					pim_ifp->mroute_vif_index);
+
 			pim_upstream_inherited_olist(pim_ifp->pim, up);
 			if (!up->channel_oil->installed)
 				pim_mroute_add(up->channel_oil,
@@ -523,8 +523,8 @@ static int pim_mroute_msg_wrvifwhole(int fd, struct interface *ifp,
 		} else {
 			if (I_am_RP(pim_ifp->pim, up->sg.grp)) {
 				if (pim_nexthop_lookup(pim_ifp->pim, &source,
-						       up->upstream_register, 0)
-				    == 0)
+						       up->upstream_register,
+						       0))
 					pim_register_stop_send(
 						source.interface, &sg,
 						pim_ifp->primary_address,
@@ -540,9 +540,6 @@ static int pim_mroute_msg_wrvifwhole(int fd, struct interface *ifp,
 	}
 
 	pim_ifp = ifp->info;
-	oil = pim_channel_oil_add(pim_ifp->pim, &sg, pim_ifp->mroute_vif_index);
-	if (!oil->installed)
-		pim_mroute_add(oil, __PRETTY_FUNCTION__);
 	if (pim_if_connected_to_source(ifp, sg.src)) {
 		up = pim_upstream_add(pim_ifp->pim, &sg, ifp,
 				      PIM_UPSTREAM_FLAG_MASK_FHR,
@@ -557,13 +554,18 @@ static int pim_mroute_msg_wrvifwhole(int fd, struct interface *ifp,
 		PIM_UPSTREAM_FLAG_SET_SRC_STREAM(up->flags);
 		pim_upstream_keep_alive_timer_start(
 			up, pim_ifp->pim->keep_alive_time);
-		up->channel_oil = oil;
 		up->channel_oil->cc.pktcnt++;
 		pim_register_join(up);
 		pim_upstream_inherited_olist(pim_ifp->pim, up);
 
 		// Send the packet to the RP
 		pim_mroute_msg_wholepkt(fd, ifp, buf);
+	} else {
+		up = pim_upstream_add(pim_ifp->pim, &sg, ifp,
+				      PIM_UPSTREAM_FLAG_MASK_SRC_NOCACHE,
+				      __PRETTY_FUNCTION__, NULL);
+		if (!up->channel_oil->installed)
+			pim_mroute_add(up->channel_oil, __PRETTY_FUNCTION__);
 	}
 
 	return 0;
@@ -733,7 +735,7 @@ int pim_mroute_socket_enable(struct pim_instance *pim)
 {
 	int fd;
 
-	frr_elevate_privs(&pimd_privs) {
+	frr_with_privs(&pimd_privs) {
 
 		fd = socket(AF_INET, SOCK_RAW, IPPROTO_IGMP);
 
@@ -889,6 +891,12 @@ int pim_mroute_add(struct channel_oil *c_oil, const char *name)
 	int err;
 	int orig = 0;
 	int orig_iif_vif = 0;
+	struct pim_interface *pim_reg_ifp = NULL;
+	int orig_pimreg_ttl = 0;
+	bool pimreg_ttl_reset = false;
+	struct pim_interface *vxlan_ifp = NULL;
+	int orig_term_ttl = 0;
+	bool orig_term_ttl_reset = false;
 
 	pim->mroute_add_last = pim_time_monotonic_sec();
 	++pim->mroute_add_events;
@@ -912,6 +920,37 @@ int pim_mroute_add(struct channel_oil *c_oil, const char *name)
 	if (c_oil->oil.mfcc_origin.s_addr == INADDR_ANY) {
 		orig = c_oil->oil.mfcc_ttls[c_oil->oil.mfcc_parent];
 		c_oil->oil.mfcc_ttls[c_oil->oil.mfcc_parent] = 1;
+	}
+
+	if (c_oil->up) {
+		/* suppress pimreg in the OIL if the mroute is not supposed to
+		 * trigger register encapsulated data
+		 */
+		if (PIM_UPSTREAM_FLAG_TEST_NO_PIMREG_DATA(c_oil->up->flags)) {
+			pim_reg_ifp = pim->regiface->info;
+			orig_pimreg_ttl =
+				c_oil->oil.mfcc_ttls[pim_reg_ifp->mroute_vif_index];
+			c_oil->oil.mfcc_ttls[pim_reg_ifp->mroute_vif_index] = 0;
+			/* remember to flip it back after MFC programming */
+			pimreg_ttl_reset = true;
+		}
+
+		vxlan_ifp = pim_vxlan_get_term_ifp(pim);
+		/* 1. vxlan termination device must never be added to the
+		 * origination mroute (and that can actually happen because
+		 * of XG inheritance from the termination mroute) otherwise
+		 * traffic will end up looping.
+		 * 2. vxlan termination device should be removed from the non-DF
+		 * to prevent duplicates to the overlay rxer
+		 */
+		if (vxlan_ifp &&
+			(PIM_UPSTREAM_FLAG_TEST_SRC_VXLAN_ORIG(c_oil->up->flags) ||
+			 PIM_UPSTREAM_FLAG_TEST_MLAG_NON_DF(c_oil->up->flags))) {
+			orig_term_ttl_reset = true;
+			orig_term_ttl =
+				c_oil->oil.mfcc_ttls[vxlan_ifp->mroute_vif_index];
+			c_oil->oil.mfcc_ttls[vxlan_ifp->mroute_vif_index] = 0;
+		}
 	}
 
 	/*
@@ -940,6 +979,16 @@ int pim_mroute_add(struct channel_oil *c_oil, const char *name)
 	if (c_oil->oil.mfcc_origin.s_addr == INADDR_ANY)
 		c_oil->oil.mfcc_ttls[c_oil->oil.mfcc_parent] = orig;
 
+	if (pimreg_ttl_reset) {
+		assert(pim_reg_ifp);
+		c_oil->oil.mfcc_ttls[pim_reg_ifp->mroute_vif_index] =
+			orig_pimreg_ttl;
+	}
+
+	if (orig_term_ttl_reset)
+		c_oil->oil.mfcc_ttls[vxlan_ifp->mroute_vif_index] =
+			orig_term_ttl;
+
 	if (err) {
 		zlog_warn(
 			"%s %s: failure: setsockopt(fd=%d,IPPROTO_IP,MRT_ADD_MFC): errno=%d: %s",
@@ -956,6 +1005,8 @@ int pim_mroute_add(struct channel_oil *c_oil, const char *name)
 	}
 
 	c_oil->installed = 1;
+	c_oil->mroute_creation = pim_time_monotonic_sec();
+
 	return 0;
 }
 
@@ -1022,7 +1073,7 @@ void pim_mroute_update_counters(struct channel_oil *c_oil)
 			sg.grp = c_oil->oil.mfcc_mcastgrp;
 			if (PIM_DEBUG_MROUTE)
 				zlog_debug(
-					"Channel(%s) is not installed no need to collect data from kernel",
+					"Channel%s is not installed no need to collect data from kernel",
 					pim_str_sg_dump(&sg));
 		}
 		return;
@@ -1041,7 +1092,7 @@ void pim_mroute_update_counters(struct channel_oil *c_oil)
 			sg.grp = c_oil->oil.mfcc_mcastgrp;
 
 			zlog_warn(
-				"ioctl(SIOCGETSGCNT=%lu) failure for (S,G)=(%s): errno=%d: %s",
+				"ioctl(SIOCGETSGCNT=%lu) failure for (S,G)=%s: errno=%d: %s",
 				(unsigned long)SIOCGETSGCNT,
 				pim_str_sg_dump(&sg), errno,
 				safe_strerror(errno));

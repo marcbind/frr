@@ -17,6 +17,10 @@
  * Foundation, Inc., 51 Franklin St, Fifth Floor, Boston, MA 02110-1301 USA
  */
 
+#ifdef HAVE_CONFIG_H
+#include "config.h"
+#endif
+
 #include "bgp_addpath.h"
 #include "bgp_route.h"
 
@@ -384,7 +388,7 @@ void bgp_addpath_set_peer_type(struct peer *peer, afi_t afi, safi_t safi,
 		}
 	}
 
-	zlog_info("Resetting peer %s%s due to change in addpath config\n",
+	zlog_info("Resetting peer %s%s due to change in addpath config",
 		  CHECK_FLAG(peer->sflags, PEER_STATUS_GROUP) ? "group " : "",
 		  peer->host);
 

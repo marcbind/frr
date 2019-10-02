@@ -55,9 +55,6 @@ DEFINE_MTYPE_STATIC(OSPFD, OSPF_EXTERNAL, "OSPF External route table")
 DEFINE_MTYPE_STATIC(OSPFD, OSPF_REDISTRIBUTE, "OSPF Redistriute")
 DEFINE_MTYPE_STATIC(OSPFD, OSPF_DIST_ARGS, "OSPF Distribute arguments")
 
-DEFINE_HOOK(ospf_if_update, (struct interface * ifp), (ifp))
-DEFINE_HOOK(ospf_if_delete, (struct interface * ifp), (ifp))
-
 /* Zebra structure to hold current status. */
 struct zclient *zclient = NULL;
 
@@ -65,8 +62,7 @@ struct zclient *zclient = NULL;
 extern struct thread_master *master;
 
 /* Router-id update message from zebra. */
-static int ospf_router_id_update_zebra(int command, struct zclient *zclient,
-				       zebra_size_t length, vrf_id_t vrf_id)
+static int ospf_router_id_update_zebra(ZAPI_CALLBACK_ARGS)
 {
 	struct ospf *ospf = NULL;
 	struct prefix router_id;
@@ -98,179 +94,13 @@ static int ospf_router_id_update_zebra(int command, struct zclient *zclient,
 	return 0;
 }
 
-/* Inteface addition message from zebra. */
-static int ospf_interface_add(int command, struct zclient *zclient,
-			      zebra_size_t length, vrf_id_t vrf_id)
-{
-	struct interface *ifp = NULL;
-	struct ospf *ospf = NULL;
-
-	ifp = zebra_interface_add_read(zclient->ibuf, vrf_id);
-	if (ifp == NULL)
-		return 0;
-
-	if (IS_DEBUG_OSPF(zebra, ZEBRA_INTERFACE))
-		zlog_debug(
-			"Zebra: interface add %s vrf %s[%u] index %d flags %llx metric %d mtu %d speed %u",
-			ifp->name, ospf_vrf_id_to_name(ifp->vrf_id),
-			ifp->vrf_id, ifp->ifindex,
-			(unsigned long long)ifp->flags, ifp->metric, ifp->mtu,
-			ifp->speed);
-
-	assert(ifp->info);
-
-	if (IF_DEF_PARAMS(ifp)
-	    && !OSPF_IF_PARAM_CONFIGURED(IF_DEF_PARAMS(ifp), type)) {
-		SET_IF_PARAM(IF_DEF_PARAMS(ifp), type);
-		IF_DEF_PARAMS(ifp)->type = ospf_default_iftype(ifp);
-	}
-
-	ospf = ospf_lookup_by_vrf_id(vrf_id);
-	if (!ospf)
-		return 0;
-
-	ospf_if_recalculate_output_cost(ifp);
-
-	ospf_if_update(ospf, ifp);
-
-	hook_call(ospf_if_update, ifp);
-
-	return 0;
-}
-
-static int ospf_interface_delete(int command, struct zclient *zclient,
-				 zebra_size_t length, vrf_id_t vrf_id)
-{
-	struct interface *ifp;
-	struct stream *s;
-	struct route_node *rn;
-
-	s = zclient->ibuf;
-	/* zebra_interface_state_read() updates interface structure in iflist */
-	ifp = zebra_interface_state_read(s, vrf_id);
-
-	if (ifp == NULL)
-		return 0;
-
-	if (IS_DEBUG_OSPF(zebra, ZEBRA_INTERFACE))
-		zlog_debug(
-			"Zebra: interface delete %s vrf %s[%u] index %d flags %llx metric %d mtu %d",
-			ifp->name, ospf_vrf_id_to_name(ifp->vrf_id),
-			ifp->vrf_id, ifp->ifindex,
-			(unsigned long long)ifp->flags, ifp->metric, ifp->mtu);
-
-	hook_call(ospf_if_delete, ifp);
-
-	for (rn = route_top(IF_OIFS(ifp)); rn; rn = route_next(rn))
-		if (rn->info)
-			ospf_if_free((struct ospf_interface *)rn->info);
-
-	if_set_index(ifp, IFINDEX_INTERNAL);
-	return 0;
-}
-
-static struct interface *zebra_interface_if_lookup(struct stream *s,
-						   vrf_id_t vrf_id)
-{
-	char ifname_tmp[INTERFACE_NAMSIZ];
-
-	/* Read interface name. */
-	stream_get(ifname_tmp, s, INTERFACE_NAMSIZ);
-
-	/* And look it up. */
-	return if_lookup_by_name(ifname_tmp, vrf_id);
-}
-
-static int ospf_interface_state_up(int command, struct zclient *zclient,
-				   zebra_size_t length, vrf_id_t vrf_id)
-{
-	struct interface *ifp;
-	struct ospf_interface *oi;
-	struct route_node *rn;
-
-	ifp = zebra_interface_if_lookup(zclient->ibuf, vrf_id);
-
-	if (ifp == NULL)
-		return 0;
-
-	/* Interface is already up. */
-	if (if_is_operative(ifp)) {
-		/* Temporarily keep ifp values. */
-		struct interface if_tmp;
-		memcpy(&if_tmp, ifp, sizeof(struct interface));
-
-		zebra_interface_if_set_value(zclient->ibuf, ifp);
-
-		if (IS_DEBUG_OSPF(zebra, ZEBRA_INTERFACE))
-			zlog_debug(
-				"Zebra: Interface[%s] state update speed %u -> %u, bw  %d -> %d",
-				ifp->name, if_tmp.speed, ifp->speed,
-				if_tmp.bandwidth, ifp->bandwidth);
-
-		ospf_if_recalculate_output_cost(ifp);
-
-		if (if_tmp.mtu != ifp->mtu) {
-			if (IS_DEBUG_OSPF(zebra, ZEBRA_INTERFACE))
-				zlog_debug(
-					"Zebra: Interface[%s] MTU change %u -> %u.",
-					ifp->name, if_tmp.mtu, ifp->mtu);
-
-			/* Must reset the interface (simulate down/up) when MTU
-			 * changes. */
-			ospf_if_reset(ifp);
-		}
-		return 0;
-	}
-
-	zebra_interface_if_set_value(zclient->ibuf, ifp);
-
-	if (IS_DEBUG_OSPF(zebra, ZEBRA_INTERFACE))
-		zlog_debug("Zebra: Interface[%s] state change to up.",
-			   ifp->name);
-
-	for (rn = route_top(IF_OIFS(ifp)); rn; rn = route_next(rn)) {
-		if ((oi = rn->info) == NULL)
-			continue;
-
-		ospf_if_up(oi);
-	}
-
-	return 0;
-}
-
-static int ospf_interface_state_down(int command, struct zclient *zclient,
-				     zebra_size_t length, vrf_id_t vrf_id)
-{
-	struct interface *ifp;
-	struct ospf_interface *oi;
-	struct route_node *node;
-
-	ifp = zebra_interface_state_read(zclient->ibuf, vrf_id);
-
-	if (ifp == NULL)
-		return 0;
-
-	if (IS_DEBUG_OSPF(zebra, ZEBRA_INTERFACE))
-		zlog_debug("Zebra: Interface[%s] state change to down.",
-			   ifp->name);
-
-	for (node = route_top(IF_OIFS(ifp)); node; node = route_next(node)) {
-		if ((oi = node->info) == NULL)
-			continue;
-		ospf_if_down(oi);
-	}
-
-	return 0;
-}
-
-static int ospf_interface_address_add(int command, struct zclient *zclient,
-				      zebra_size_t length, vrf_id_t vrf_id)
+static int ospf_interface_address_add(ZAPI_CALLBACK_ARGS)
 {
 	struct connected *c;
 	struct ospf *ospf = NULL;
 
 
-	c = zebra_interface_address_read(command, zclient->ibuf, vrf_id);
+	c = zebra_interface_address_read(cmd, zclient->ibuf, vrf_id);
 
 	if (c == NULL)
 		return 0;
@@ -289,13 +119,12 @@ static int ospf_interface_address_add(int command, struct zclient *zclient,
 
 	ospf_if_update(ospf, c->ifp);
 
-	hook_call(ospf_if_update, c->ifp);
+	ospf_if_interface(c->ifp);
 
 	return 0;
 }
 
-static int ospf_interface_address_delete(int command, struct zclient *zclient,
-					 zebra_size_t length, vrf_id_t vrf_id)
+static int ospf_interface_address_delete(ZAPI_CALLBACK_ARGS)
 {
 	struct connected *c;
 	struct interface *ifp;
@@ -303,7 +132,7 @@ static int ospf_interface_address_delete(int command, struct zclient *zclient,
 	struct route_node *rn;
 	struct prefix p;
 
-	c = zebra_interface_address_read(command, zclient->ibuf, vrf_id);
+	c = zebra_interface_address_read(cmd, zclient->ibuf, vrf_id);
 
 	if (c == NULL)
 		return 0;
@@ -332,15 +161,14 @@ static int ospf_interface_address_delete(int command, struct zclient *zclient,
 	/* Call interface hook functions to clean up */
 	ospf_if_free(oi);
 
-	hook_call(ospf_if_update, c->ifp);
+	ospf_if_interface(c->ifp);
 
 	connected_free(c);
 
 	return 0;
 }
 
-static int ospf_interface_link_params(int command, struct zclient *zclient,
-				      zebra_size_t length, vrf_id_t vrf_id)
+static int ospf_interface_link_params(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp;
 
@@ -356,8 +184,7 @@ static int ospf_interface_link_params(int command, struct zclient *zclient,
 }
 
 /* VRF update for an interface. */
-static int ospf_interface_vrf_update(int command, struct zclient *zclient,
-				     zebra_size_t length, vrf_id_t vrf_id)
+static int ospf_interface_vrf_update(ZAPI_CALLBACK_ARGS)
 {
 	struct interface *ifp = NULL;
 	vrf_id_t new_vrf_id;
@@ -560,8 +387,7 @@ struct ospf_external *ospf_external_add(struct ospf *ospf, uint8_t type,
 		ospf->external[type] = list_new();
 
 	ext_list = ospf->external[type];
-	ext = (struct ospf_external *)XCALLOC(MTYPE_OSPF_EXTERNAL,
-					      sizeof(struct ospf_external));
+	ext = XCALLOC(MTYPE_OSPF_EXTERNAL, sizeof(struct ospf_external));
 	ext->instance = instance;
 	EXTERNAL_INFO(ext) = route_table_init();
 
@@ -621,8 +447,7 @@ struct ospf_redist *ospf_redist_add(struct ospf *ospf, uint8_t type,
 		ospf->redist[type] = list_new();
 
 	red_list = ospf->redist[type];
-	red = (struct ospf_redist *)XCALLOC(MTYPE_OSPF_REDISTRIBUTE,
-					    sizeof(struct ospf_redist));
+	red = XCALLOC(MTYPE_OSPF_REDISTRIBUTE, sizeof(struct ospf_redist));
 	red->instance = instance;
 	red->dmetric.type = -1;
 	red->dmetric.value = -1;
@@ -755,10 +580,10 @@ int ospf_redistribute_unset(struct ospf *ospf, int type,
 int ospf_redistribute_default_set(struct ospf *ospf, int originate, int mtype,
 				  int mvalue)
 {
-	struct ospf_external *ext;
 	struct prefix_ipv4 p;
 	struct in_addr nexthop;
 	int cur_originate = ospf->default_originate;
+	const char *type_str = NULL;
 
 	nexthop.s_addr = 0;
 	p.family = AF_INET;
@@ -767,41 +592,7 @@ int ospf_redistribute_default_set(struct ospf *ospf, int originate, int mtype,
 
 	ospf->default_originate = originate;
 
-	ospf_external_add(ospf, DEFAULT_ROUTE, 0);
-
-	if (cur_originate == DEFAULT_ORIGINATE_NONE) {
-		/* First time configuration */
-		if (IS_DEBUG_OSPF(zebra, ZEBRA_REDISTRIBUTE))
-			zlog_debug("Redistribute[DEFAULT]: Start Type[%d], Metric[%d]",
-			metric_type(ospf, DEFAULT_ROUTE, 0),
-			metric_value(ospf, DEFAULT_ROUTE, 0));
-
-		if (ospf->router_id.s_addr == 0)
-			ospf->external_origin |= (1 << DEFAULT_ROUTE);
-		if ((originate == DEFAULT_ORIGINATE_ALWAYS)
-			  && (ospf->router_id.s_addr)) {
-
-			/* always , so originate lsa even it doesn't
-			 * exist in RIB.
-			 */
-			ospf_external_info_add(ospf, DEFAULT_ROUTE, 0,
-						 p, 0, nexthop, 0);
-			ospf_external_lsa_refresh_default(ospf);
-
-		} else if (originate == DEFAULT_ORIGINATE_ZEBRA) {
-			/* Send msg to Zebra to validate default route
-			 * existance.
-			 */
-			zclient_redistribute_default(
-				ZEBRA_REDISTRIBUTE_DEFAULT_ADD, zclient, AFI_IP,
-				ospf->vrf_id);
-		}
-
-		ospf_asbr_status_update(ospf, ++ospf->redistribute);
-		return CMD_SUCCESS;
-
-
-	} else if (originate == cur_originate) {
+	if (cur_originate == originate) {
 		/* Refresh the lsa since metric might different */
 		if (IS_DEBUG_OSPF(zebra, ZEBRA_REDISTRIBUTE))
 			zlog_debug(
@@ -811,67 +602,51 @@ int ospf_redistribute_default_set(struct ospf *ospf, int originate, int mtype,
 				metric_value(ospf, DEFAULT_ROUTE, 0));
 
 		ospf_external_lsa_refresh_default(ospf);
-
-	} else {
-		/* "default-info originate always" configured now,
-		 * where "default-info originate" configured previoulsly.
-		 */
-		if (originate == DEFAULT_ORIGINATE_ALWAYS) {
-
-			zclient_redistribute_default(
-					ZEBRA_REDISTRIBUTE_DEFAULT_DELETE,
-					zclient, AFI_IP, ospf->vrf_id);
-			/* here , ex-info should be added since ex-info might
-			 * have not updated earlier if def route is not exist.
-			 * If ex-iinfo ex-info already exist , it will return
-			 * smoothly.
-			 */
-			ospf_external_info_add(ospf, DEFAULT_ROUTE, 0,
-						 p, 0, nexthop, 0);
-			ospf_external_lsa_refresh_default(ospf);
-
-		} else {
-			/* "default-info originate" configured now,where
-			 * "default-info originate always" configured
-			 * previoulsy.
-			 */
-
-			ospf_external_lsa_flush(ospf, DEFAULT_ROUTE, &p, 0);
-
-			ext = ospf_external_lookup(ospf, DEFAULT_ROUTE, 0);
-			if (ext && EXTERNAL_INFO(ext))
-				ospf_external_info_delete(ospf,
-						 DEFAULT_ROUTE, 0, p);
-
-			zclient_redistribute_default(
-					ZEBRA_REDISTRIBUTE_DEFAULT_ADD,
-					zclient, AFI_IP, ospf->vrf_id);
-		}
+		return CMD_SUCCESS;
 	}
 
-	return CMD_SUCCESS;
-}
-int ospf_redistribute_default_unset(struct ospf *ospf)
-{
-	if (ospf->default_originate == DEFAULT_ORIGINATE_ZEBRA) {
-		if (!ospf_is_type_redistributed(ospf, DEFAULT_ROUTE, 0))
-			return CMD_SUCCESS;
+	switch (cur_originate) {
+	case DEFAULT_ORIGINATE_NONE:
+		break;
+	case DEFAULT_ORIGINATE_ZEBRA:
 		zclient_redistribute_default(ZEBRA_REDISTRIBUTE_DEFAULT_DELETE,
 				 zclient, AFI_IP, ospf->vrf_id);
+		ospf->redistribute--;
+		break;
+	case DEFAULT_ORIGINATE_ALWAYS:
+		ospf_external_info_delete(ospf, DEFAULT_ROUTE, 0, p);
+		ospf_external_del(ospf, DEFAULT_ROUTE, 0);
+		ospf->redistribute--;
+		break;
 	}
 
-	ospf->default_originate = DEFAULT_ORIGINATE_NONE;
+	switch (originate) {
+	case DEFAULT_ORIGINATE_NONE:
+		type_str = "none";
+		break;
+	case DEFAULT_ORIGINATE_ZEBRA:
+		type_str = "normal";
+		ospf->redistribute++;
+		zclient_redistribute_default(ZEBRA_REDISTRIBUTE_DEFAULT_ADD,
+					     zclient, AFI_IP, ospf->vrf_id);
+		break;
+	case DEFAULT_ORIGINATE_ALWAYS:
+		type_str = "always";
+		ospf->redistribute++;
+		ospf_external_add(ospf, DEFAULT_ROUTE, 0);
+		ospf_external_info_add(ospf, DEFAULT_ROUTE, 0, p, 0, nexthop,
+				       0);
+		break;
+	}
 
 	if (IS_DEBUG_OSPF(zebra, ZEBRA_REDISTRIBUTE))
-		zlog_debug("Redistribute[DEFAULT]: Stop");
+		zlog_debug("Redistribute[DEFAULT]: %s Type[%d], Metric[%d]",
+		type_str,
+		metric_type(ospf, DEFAULT_ROUTE, 0),
+		metric_value(ospf, DEFAULT_ROUTE, 0));
 
-	// Pending: how does the external_info cleanup work in this case?
-
-	ospf_asbr_status_update(ospf, --ospf->redistribute);
-
-	/* clean up maxage default originate external lsa */
-	ospf_default_originate_lsa_update(ospf);
-
+	ospf_external_lsa_refresh_default(ospf);
+	ospf_asbr_status_update(ospf, ospf->redistribute);
 	return CMD_SUCCESS;
 }
 
@@ -954,7 +729,7 @@ int ospf_redistribute_check(struct ospf *ospf, struct external_info *ei,
 	/* apply route-map if needed */
 	red = ospf_redist_lookup(ospf, type, instance);
 	if (red && ROUTEMAP_NAME(red)) {
-		int ret;
+		route_map_result_t ret;
 
 		ret = route_map_apply(ROUTEMAP(red), (struct prefix *)p,
 				      RMAP_OSPF, ei);
@@ -1005,8 +780,7 @@ void ospf_routemap_unset(struct ospf_redist *red)
 }
 
 /* Zebra route add and delete treatment. */
-static int ospf_zebra_read_route(int command, struct zclient *zclient,
-				 zebra_size_t length, vrf_id_t vrf_id)
+static int ospf_zebra_read_route(ZAPI_CALLBACK_ARGS)
 {
 	struct zapi_route api;
 	struct prefix_ipv4 p;
@@ -1045,11 +819,12 @@ static int ospf_zebra_read_route(int command, struct zclient *zclient,
 		char buf_prefix[PREFIX_STRLEN];
 		prefix2str(&api.prefix, buf_prefix, sizeof(buf_prefix));
 
-		zlog_debug("%s: from client %s: vrf_id %d, p %s", __func__,
+		zlog_debug("%s: cmd %s from client %s: vrf_id %d, p %s",
+			   __func__, zserv_command_string(cmd),
 			   zebra_route_string(api.type), vrf_id, buf_prefix);
 	}
 
-	if (command == ZEBRA_REDISTRIBUTE_ROUTE_ADD) {
+	if (cmd == ZEBRA_REDISTRIBUTE_ROUTE_ADD) {
 		/* XXX|HACK|TODO|FIXME:
 		 * Maybe we should ignore reject/blackhole routes? Testing
 		 * shows that there is no problems though and this is only way
@@ -1079,11 +854,7 @@ static int ospf_zebra_read_route(int command, struct zclient *zclient,
 			/* Nothing has changed, so nothing to do; return */
 			return 0;
 		}
-		if (ospf->router_id.s_addr == 0)
-			/* Set flags to generate AS-external-LSA originate event
-			   for each redistributed protocols later. */
-			ospf->external_origin |= (1 << rt_type);
-		else {
+		if (ospf->router_id.s_addr != 0) {
 			if (ei) {
 				if (is_prefix_default(&p))
 					ospf_external_lsa_refresh_default(ospf);
@@ -1110,7 +881,7 @@ static int ospf_zebra_read_route(int command, struct zclient *zclient,
 				}
 			}
 		}
-	} else /* if (command == ZEBRA_REDISTRIBUTE_ROUTE_DEL) */
+	} else /* if (cmd == ZEBRA_REDISTRIBUTE_ROUTE_DEL) */
 	{
 		ospf_external_info_delete(ospf, rt_type, api.instance, p);
 		if (is_prefix_default(&p))
@@ -1577,7 +1348,7 @@ void ospf_zebra_vrf_deregister(struct ospf *ospf)
 static void ospf_zebra_connected(struct zclient *zclient)
 {
 	/* Send the client registration */
-	bfd_client_sendmsg(zclient, ZEBRA_BFD_CLIENT_REGISTER);
+	bfd_client_sendmsg(zclient, ZEBRA_BFD_CLIENT_REGISTER, VRF_DEFAULT);
 
 	zclient_send_reg_requests(zclient, VRF_DEFAULT);
 }
@@ -1589,10 +1360,6 @@ void ospf_zebra_init(struct thread_master *master, unsigned short instance)
 	zclient_init(zclient, ZEBRA_ROUTE_OSPF, instance, &ospfd_privs);
 	zclient->zebra_connected = ospf_zebra_connected;
 	zclient->router_id_update = ospf_router_id_update_zebra;
-	zclient->interface_add = ospf_interface_add;
-	zclient->interface_delete = ospf_interface_delete;
-	zclient->interface_up = ospf_interface_state_up;
-	zclient->interface_down = ospf_interface_state_down;
 	zclient->interface_address_add = ospf_interface_address_add;
 	zclient->interface_address_delete = ospf_interface_address_delete;
 	zclient->interface_link_params = ospf_interface_link_params;

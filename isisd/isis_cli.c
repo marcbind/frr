@@ -136,8 +136,6 @@ DEFPY(ip_router_isis, ip_router_isis_cmd, "ip router isis WORD$tag",
 	const char *circ_type;
 	struct isis_area *area;
 	struct interface *ifp;
-	const struct lyd_node *dnode =
-		yang_dnode_get(running_config->dnode, VTY_CURR_XPATH);
 
 	/* area will be created if it is not present. make sure the yang model
 	 * is synced with FRR and call the appropriate NB cb.
@@ -190,7 +188,7 @@ DEFPY(ip_router_isis, ip_router_isis_cmd, "ip router isis WORD$tag",
 	}
 
 	/* check if the interface is a loopback and if so set it as passive */
-	ifp = yang_dnode_get_entry(dnode, false);
+	ifp = nb_running_get_entry(NULL, VTY_CURR_XPATH, false);
 	if (ifp && if_is_loopback(ifp))
 		nb_cli_enqueue_change(vty, "./frr-isisd:isis/passive",
 				      NB_OP_MODIFY, "true");
@@ -208,8 +206,6 @@ DEFPY(ip6_router_isis, ip6_router_isis_cmd, "ipv6 router isis WORD$tag",
 	const char *circ_type;
 	struct isis_area *area;
 	struct interface *ifp;
-	const struct lyd_node *dnode =
-		yang_dnode_get(running_config->dnode, VTY_CURR_XPATH);
 
 	/* area will be created if it is not present. make sure the yang model
 	 * is synced with FRR and call the appropriate NB cb.
@@ -262,7 +258,7 @@ DEFPY(ip6_router_isis, ip6_router_isis_cmd, "ipv6 router isis WORD$tag",
 	}
 
 	/* check if the interface is a loopback and if so set it as passive */
-	ifp = yang_dnode_get_entry(dnode, false);
+	ifp = nb_running_get_entry(NULL, VTY_CURR_XPATH, false);
 	if (ifp && if_is_loopback(ifp))
 		nb_cli_enqueue_change(vty, "./frr-isisd:isis/passive",
 				      NB_OP_MODIFY, "true");
@@ -329,6 +325,40 @@ void cli_show_ip_isis_ipv6(struct vty *vty, struct lyd_node *dnode,
 }
 
 /*
+ * XPath: /frr-interface:lib/interface/frr-isisd:isis/bfd-monitoring
+ */
+DEFPY(isis_bfd,
+      isis_bfd_cmd,
+      "[no] isis bfd",
+      NO_STR
+      PROTO_HELP
+      "Enable BFD support\n")
+{
+	const struct lyd_node *dnode;
+
+	dnode = yang_dnode_get(vty->candidate_config->dnode,
+			       "%s/frr-isisd:isis", VTY_CURR_XPATH);
+	if (dnode == NULL) {
+		vty_out(vty, "ISIS is not enabled on this circuit\n");
+		return CMD_SUCCESS;
+	}
+
+	nb_cli_enqueue_change(vty, "./frr-isisd:isis/bfd-monitoring",
+			      NB_OP_MODIFY, no ? "false" : "true");
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+void cli_show_ip_isis_bfd_monitoring(struct vty *vty, struct lyd_node *dnode,
+				     bool show_defaults)
+{
+	if (!yang_dnode_get_bool(dnode, NULL))
+		vty_out(vty, " no");
+
+	vty_out(vty, " isis bfd\n");
+}
+
+/*
  * XPath: /frr-isisd:isis/instance/area-address
  */
 DEFPY(net, net_cmd, "[no] net WORD",
@@ -373,9 +403,9 @@ DEFPY(no_is_type, no_is_type_cmd,
       "Act as an area router only\n")
 {
 	const char *value = NULL;
-	const struct lyd_node *dnode =
-		yang_dnode_get(running_config->dnode, VTY_CURR_XPATH);
-	struct isis_area *area = yang_dnode_get_entry(dnode, false);
+	struct isis_area *area;
+
+	area = nb_running_get_entry(NULL, VTY_CURR_XPATH, false);
 
 	/*
 	 * Put the is-type back to defaults:
@@ -932,12 +962,12 @@ void cli_show_isis_purge_origin(struct vty *vty, struct lyd_node *dnode,
 }
 
 /*
- * XPath: /frr-isisd:isis/mpls-te
+ * XPath: /frr-isisd:isis/instance/mpls-te
  */
 DEFPY(isis_mpls_te_on, isis_mpls_te_on_cmd, "mpls-te on",
       MPLS_TE_STR "Enable the MPLS-TE functionality\n")
 {
-	nb_cli_enqueue_change(vty, "/frr-isisd:isis/mpls-te", NB_OP_CREATE,
+	nb_cli_enqueue_change(vty, "./mpls-te", NB_OP_CREATE,
 			      NULL);
 
 	return nb_cli_apply_changes(vty, NULL);
@@ -946,9 +976,9 @@ DEFPY(isis_mpls_te_on, isis_mpls_te_on_cmd, "mpls-te on",
 DEFPY(no_isis_mpls_te_on, no_isis_mpls_te_on_cmd, "no mpls-te [on]",
       NO_STR
       "Disable the MPLS-TE functionality\n"
-      "Enable the MPLS-TE functionality\n")
+      "Disable the MPLS-TE functionality\n")
 {
-	nb_cli_enqueue_change(vty, "/frr-isisd:isis/mpls-te", NB_OP_DESTROY,
+	nb_cli_enqueue_change(vty, "./mpls-te", NB_OP_DESTROY,
 			      NULL);
 
 	return nb_cli_apply_changes(vty, NULL);
@@ -961,7 +991,7 @@ void cli_show_isis_mpls_te(struct vty *vty, struct lyd_node *dnode,
 }
 
 /*
- * XPath: /frr-isisd:isis/mpls-te/router-address
+ * XPath: /frr-isisd:isis/instance/mpls-te/router-address
  */
 DEFPY(isis_mpls_te_router_addr, isis_mpls_te_router_addr_cmd,
       "mpls-te router-address A.B.C.D",
@@ -969,8 +999,20 @@ DEFPY(isis_mpls_te_router_addr, isis_mpls_te_router_addr_cmd,
       "Stable IP address of the advertising router\n"
       "MPLS-TE router address in IPv4 address format\n")
 {
-	nb_cli_enqueue_change(vty, "/frr-isisd:isis/mpls-te/router-address",
+	nb_cli_enqueue_change(vty, "./mpls-te/router-address",
 			      NB_OP_MODIFY, router_address_str);
+
+	return nb_cli_apply_changes(vty, NULL);
+}
+
+DEFPY(no_isis_mpls_te_router_addr, no_isis_mpls_te_router_addr_cmd,
+      "no mpls-te router-address [A.B.C.D]",
+      NO_STR MPLS_TE_STR
+      "Delete IP address of the advertising router\n"
+      "MPLS-TE router address in IPv4 address format\n")
+{
+	nb_cli_enqueue_change(vty, "./mpls-te/router-address",
+			      NB_OP_DESTROY, NULL);
 
 	return nb_cli_apply_changes(vty, NULL);
 }
@@ -990,7 +1032,7 @@ DEFPY(isis_mpls_te_inter_as, isis_mpls_te_inter_as_cmd,
       "AREA native mode self originate INTER-AS LSP with L1 and L2 flooding scope\n"
       "AS native mode self originate INTER-AS LSP with L2 only flooding scope\n")
 {
-	vty_out(vty, "MPLS-TE Inter-AS is not yet supported.");
+	vty_out(vty, "MPLS-TE Inter-AS is not yet supported\n");
 	return CMD_SUCCESS;
 }
 
@@ -1000,7 +1042,7 @@ DEFPY(isis_mpls_te_inter_as, isis_mpls_te_inter_as_cmd,
 DEFPY(isis_default_originate, isis_default_originate_cmd,
       "[no] default-information originate <ipv4|ipv6>$ip"
       " <level-1|level-2>$level [always]$always"
-      " [<metric (0-16777215)$metric|route-map WORD$rmap>]",
+      " [{metric (0-16777215)$metric|route-map WORD$rmap}]",
       NO_STR
       "Control distribution of default information\n"
       "Distribute a default route\n"
@@ -1023,9 +1065,8 @@ DEFPY(isis_default_originate, isis_default_originate_cmd,
 		nb_cli_enqueue_change(vty, "./route-map",
 				      rmap ? NB_OP_MODIFY : NB_OP_DESTROY,
 				      rmap ? rmap : NULL);
-		nb_cli_enqueue_change(vty, "./metric",
-				      metric ? NB_OP_MODIFY : NB_OP_DESTROY,
-				      metric ? metric_str : NULL);
+		nb_cli_enqueue_change(vty, "./metric", NB_OP_MODIFY,
+				      metric_str ? metric_str : NULL);
 		if (strmatch(ip, "ipv6") && !always) {
 			vty_out(vty,
 				"Zebra doesn't implement default-originate for IPv6 yet\n");
@@ -1043,8 +1084,6 @@ static void vty_print_def_origin(struct vty *vty, struct lyd_node *dnode,
 				 const char *family, const char *level,
 				 bool show_defaults)
 {
-	const char *metric;
-
 	vty_out(vty, " default-information originate %s %s", family, level);
 	if (yang_dnode_get_bool(dnode, "./always"))
 		vty_out(vty, " always");
@@ -1052,11 +1091,10 @@ static void vty_print_def_origin(struct vty *vty, struct lyd_node *dnode,
 	if (yang_dnode_exists(dnode, "./route-map"))
 		vty_out(vty, " route-map %s",
 			yang_dnode_get_string(dnode, "./route-map"));
-	else if (yang_dnode_exists(dnode, "./metric")) {
-		metric = yang_dnode_get_string(dnode, "./metric");
-		if (show_defaults || !yang_dnode_is_default(dnode, "./metric"))
-			vty_out(vty, " metric %s", metric);
-	}
+	if (show_defaults || !yang_dnode_is_default(dnode, "./metric"))
+		vty_out(vty, " metric %s",
+			yang_dnode_get_string(dnode, "./metric"));
+
 	vty_out(vty, "\n");
 }
 
@@ -1083,7 +1121,7 @@ DEFPY(isis_redistribute, isis_redistribute_cmd,
       "[no] redistribute <ipv4|ipv6>$ip " PROTO_REDIST_STR
       "$proto"
       " <level-1|level-2>$level"
-      " [<metric (0-16777215)|route-map WORD>]",
+      " [{metric (0-16777215)|route-map WORD}]",
       NO_STR REDIST_STR
       "Redistribute IPv4 routes\n"
       "Redistribute IPv6 routes\n" PROTO_REDIST_HELP
@@ -1101,9 +1139,8 @@ DEFPY(isis_redistribute, isis_redistribute_cmd,
 		nb_cli_enqueue_change(vty, "./route-map",
 				      route_map ? NB_OP_MODIFY : NB_OP_DESTROY,
 				      route_map ? route_map : NULL);
-		nb_cli_enqueue_change(vty, "./metric",
-				      metric ? NB_OP_MODIFY : NB_OP_DESTROY,
-				      metric ? metric_str : NULL);
+		nb_cli_enqueue_change(vty, "./metric", NB_OP_MODIFY,
+				      metric_str ? metric_str : NULL);
 	}
 
 	return nb_cli_apply_changes(
@@ -1112,16 +1149,16 @@ DEFPY(isis_redistribute, isis_redistribute_cmd,
 }
 
 static void vty_print_redistribute(struct vty *vty, struct lyd_node *dnode,
-				   const char *family)
+				   bool show_defaults, const char *family)
 {
 	const char *level = yang_dnode_get_string(dnode, "./level");
 	const char *protocol = yang_dnode_get_string(dnode, "./protocol");
 
 	vty_out(vty, " redistribute %s %s %s", family, protocol, level);
-	if (yang_dnode_exists(dnode, "./metric"))
+	if (show_defaults || !yang_dnode_is_default(dnode, "./metric"))
 		vty_out(vty, " metric %s",
 			yang_dnode_get_string(dnode, "./metric"));
-	else if (yang_dnode_exists(dnode, "./route-map"))
+	if (yang_dnode_exists(dnode, "./route-map"))
 		vty_out(vty, " route-map %s",
 			yang_dnode_get_string(dnode, "./route-map"));
 	vty_out(vty, "\n");
@@ -1130,12 +1167,12 @@ static void vty_print_redistribute(struct vty *vty, struct lyd_node *dnode,
 void cli_show_isis_redistribute_ipv4(struct vty *vty, struct lyd_node *dnode,
 				     bool show_defaults)
 {
-	vty_print_redistribute(vty, dnode, "ipv4");
+	vty_print_redistribute(vty, dnode, show_defaults, "ipv4");
 }
 void cli_show_isis_redistribute_ipv6(struct vty *vty, struct lyd_node *dnode,
 				     bool show_defaults)
 {
-	vty_print_redistribute(vty, dnode, "ipv6");
+	vty_print_redistribute(vty, dnode, show_defaults, "ipv6");
 }
 
 /*
@@ -1766,7 +1803,6 @@ DEFPY(no_isis_circuit_type, no_isis_circuit_type_cmd,
       "Level-1-2 adjacencies are formed\n"
       "Level-2 only adjacencies are formed\n")
 {
-	const struct lyd_node *dnode;
 	struct interface *ifp;
 	struct isis_circuit *circuit;
 	int is_type;
@@ -1777,8 +1813,7 @@ DEFPY(no_isis_circuit_type, no_isis_circuit_type_cmd,
 	 * and the is-type of the area if there is one. So we need to do this
 	 * here.
 	 */
-	dnode = yang_dnode_get(running_config->dnode, VTY_CURR_XPATH);
-	ifp = yang_dnode_get_entry(dnode, false);
+	ifp = nb_running_get_entry(NULL, VTY_CURR_XPATH, false);
 	if (!ifp)
 		goto def_val;
 
@@ -1941,6 +1976,7 @@ void isis_cli_init(void)
 	install_element(INTERFACE_NODE, &ip_router_isis_cmd);
 	install_element(INTERFACE_NODE, &ip6_router_isis_cmd);
 	install_element(INTERFACE_NODE, &no_ip_router_isis_cmd);
+	install_element(INTERFACE_NODE, &isis_bfd_cmd);
 
 	install_element(ISIS_NODE, &net_cmd);
 
@@ -1978,6 +2014,7 @@ void isis_cli_init(void)
 	install_element(ISIS_NODE, &isis_mpls_te_on_cmd);
 	install_element(ISIS_NODE, &no_isis_mpls_te_on_cmd);
 	install_element(ISIS_NODE, &isis_mpls_te_router_addr_cmd);
+	install_element(ISIS_NODE, &no_isis_mpls_te_router_addr_cmd);
 	install_element(ISIS_NODE, &isis_mpls_te_inter_as_cmd);
 
 	install_element(ISIS_NODE, &isis_default_originate_cmd);

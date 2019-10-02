@@ -31,7 +31,7 @@ DEFINE_MTYPE_STATIC(LIB, IF_RMAP_CTX_NAME, "Interface route map container name")
 DEFINE_MTYPE_STATIC(LIB, IF_RMAP, "Interface route map")
 DEFINE_MTYPE_STATIC(LIB, IF_RMAP_NAME, "I.f. route map name")
 
-struct list *if_rmap_ctx_list;
+static struct list *if_rmap_ctx_list;
 
 static struct if_rmap *if_rmap_new(void)
 {
@@ -44,13 +44,10 @@ static struct if_rmap *if_rmap_new(void)
 
 static void if_rmap_free(struct if_rmap *if_rmap)
 {
-	if (if_rmap->ifname)
-		XFREE(MTYPE_IF_RMAP_NAME, if_rmap->ifname);
+	XFREE(MTYPE_IF_RMAP_NAME, if_rmap->ifname);
 
-	if (if_rmap->routemap[IF_RMAP_IN])
-		XFREE(MTYPE_IF_RMAP_NAME, if_rmap->routemap[IF_RMAP_IN]);
-	if (if_rmap->routemap[IF_RMAP_OUT])
-		XFREE(MTYPE_IF_RMAP_NAME, if_rmap->routemap[IF_RMAP_OUT]);
+	XFREE(MTYPE_IF_RMAP_NAME, if_rmap->routemap[IF_RMAP_IN]);
+	XFREE(MTYPE_IF_RMAP_NAME, if_rmap->routemap[IF_RMAP_OUT]);
 
 	XFREE(MTYPE_IF_RMAP, if_rmap);
 }
@@ -65,8 +62,7 @@ struct if_rmap *if_rmap_lookup(struct if_rmap_ctx *ctx, const char *ifname)
 
 	if_rmap = hash_lookup(ctx->ifrmaphash, &key);
 
-	if (key.ifname)
-		XFREE(MTYPE_IF_RMAP_NAME, key.ifname);
+	XFREE(MTYPE_IF_RMAP_NAME, key.ifname);
 
 	return if_rmap;
 }
@@ -106,13 +102,12 @@ static struct if_rmap *if_rmap_get(struct if_rmap_ctx *ctx, const char *ifname)
 
 	ret = hash_get(ctx->ifrmaphash, &key, if_rmap_hash_alloc);
 
-	if (key.ifname)
-		XFREE(MTYPE_IF_RMAP_NAME, key.ifname);
+	XFREE(MTYPE_IF_RMAP_NAME, key.ifname);
 
 	return ret;
 }
 
-static unsigned int if_rmap_hash_make(void *data)
+static unsigned int if_rmap_hash_make(const void *data)
 {
 	const struct if_rmap *if_rmap = data;
 
@@ -136,16 +131,12 @@ static struct if_rmap *if_rmap_set(struct if_rmap_ctx *ctx,
 	if_rmap = if_rmap_get(ctx, ifname);
 
 	if (type == IF_RMAP_IN) {
-		if (if_rmap->routemap[IF_RMAP_IN])
-			XFREE(MTYPE_IF_RMAP_NAME,
-			      if_rmap->routemap[IF_RMAP_IN]);
+		XFREE(MTYPE_IF_RMAP_NAME, if_rmap->routemap[IF_RMAP_IN]);
 		if_rmap->routemap[IF_RMAP_IN] =
 			XSTRDUP(MTYPE_IF_RMAP_NAME, routemap_name);
 	}
 	if (type == IF_RMAP_OUT) {
-		if (if_rmap->routemap[IF_RMAP_OUT])
-			XFREE(MTYPE_IF_RMAP_NAME,
-			      if_rmap->routemap[IF_RMAP_OUT]);
+		XFREE(MTYPE_IF_RMAP_NAME, if_rmap->routemap[IF_RMAP_OUT]);
 		if_rmap->routemap[IF_RMAP_OUT] =
 			XSTRDUP(MTYPE_IF_RMAP_NAME, routemap_name);
 	}
@@ -300,6 +291,7 @@ int config_write_if_rmap(struct vty *vty,
 
 void if_rmap_ctx_delete(struct if_rmap_ctx *ctx)
 {
+	listnode_delete(if_rmap_ctx_list, ctx);
 	hash_clean(ctx->ifrmaphash, (void (*)(void *))if_rmap_free);
 	if (ctx->name)
 		XFREE(MTYPE_IF_RMAP_CTX_NAME, ctx);

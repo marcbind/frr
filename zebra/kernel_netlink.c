@@ -23,6 +23,7 @@
 #if defined(HANDLE_NETLINK_FUZZING)
 #include <stdio.h>
 #include <string.h>
+#include "libfrr.h"
 #endif /* HANDLE_NETLINK_FUZZING */
 
 #ifdef HAVE_NETLINK
@@ -128,8 +129,18 @@ static const struct message family_str[] = {{AF_INET, "ipv4"},
 					    {RTNL_FAMILY_IP6MR, "ipv6MR"},
 					    {0}};
 
-static const struct message rttype_str[] = {{RTN_UNICAST, "unicast"},
+static const struct message rttype_str[] = {{RTN_UNSPEC, "none"},
+					    {RTN_UNICAST, "unicast"},
+					    {RTN_LOCAL, "local"},
+					    {RTN_BROADCAST, "broadcast"},
+					    {RTN_ANYCAST, "anycast"},
 					    {RTN_MULTICAST, "multicast"},
+					    {RTN_BLACKHOLE, "blackhole"},
+					    {RTN_UNREACHABLE, "unreachable"},
+					    {RTN_PROHIBIT, "prohibited"},
+					    {RTN_THROW, "throw"},
+					    {RTN_NAT, "nat"},
+					    {RTN_XRESOLVE, "resolver"},
 					    {0}};
 
 extern struct thread_master *master;
@@ -172,7 +183,7 @@ static int netlink_recvbuf(struct nlsock *nl, uint32_t newsize)
 	}
 
 	/* Try force option (linux >= 2.6.14) and fall back to normal set */
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 		ret = setsockopt(nl->sock, SOL_SOCKET, SO_RCVBUFFORCE,
 				 &nl_rcvbufsize,
 				 sizeof(nl_rcvbufsize));
@@ -209,7 +220,7 @@ static int netlink_socket(struct nlsock *nl, unsigned long groups,
 	int sock;
 	int namelen;
 
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 		sock = ns_socket(AF_NETLINK, SOCK_RAW, NETLINK_ROUTE, ns_id);
 		if (sock < 0) {
 			zlog_err("Can't open %s socket: %s", nl->name,
@@ -340,9 +351,8 @@ static void netlink_write_incoming(const char *buf, const unsigned int size,
 	char fname[MAXPATHLEN];
 	FILE *f;
 
-	snprintf(fname, MAXPATHLEN, "%s/%s_%u", DAEMON_VTY_DIR, "netlink",
-		 counter);
-	frr_elevate_privs(&zserv_privs) {
+	snprintf(fname, MAXPATHLEN, "%s/%s_%u", frr_vtydir, "netlink", counter);
+	frr_with_privs(&zserv_privs) {
 		f = fopen(fname, "w");
 	}
 	if (f) {
@@ -363,7 +373,7 @@ static long netlink_read_file(char *buf, const char *fname)
 	FILE *f;
 	long file_bytes = -1;
 
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 		f = fopen(fname, "r");
 	}
 	if (f) {
@@ -606,53 +616,59 @@ const char *nl_rttype_to_str(uint8_t rttype)
 	return lookup_msg(rttype_str, rttype, "");
 }
 
-#define NL_OK(nla, len)                                                        \
+#define NLA_OK(nla, len)                                                       \
 	((len) >= (int)sizeof(struct nlattr)                                   \
 	 && (nla)->nla_len >= sizeof(struct nlattr)                            \
 	 && (nla)->nla_len <= (len))
-#define NL_NEXT(nla, attrlen)                                                  \
-	((attrlen) -= RTA_ALIGN((nla)->nla_len),                               \
-	 (struct nlattr *)(((char *)(nla)) + RTA_ALIGN((nla)->nla_len)))
-#define NL_RTA(r)                                                              \
-	((struct nlattr *)(((char *)(r))                                       \
-			   + NLMSG_ALIGN(sizeof(struct nlmsgerr))))
+#define NLA_NEXT(nla, attrlen)                                                 \
+	((attrlen) -= NLA_ALIGN((nla)->nla_len),                               \
+	 (struct nlattr *)(((char *)(nla)) + NLA_ALIGN((nla)->nla_len)))
+#define NLA_LENGTH(len) (NLA_ALIGN(sizeof(struct nlattr)) + (len))
+#define NLA_DATA(nla) ((struct nlattr *)(((char *)(nla)) + NLA_LENGTH(0)))
+
+#define ERR_NLA(err, inner_len)                                                \
+	((struct nlattr *)(((char *)(err))                                     \
+			   + NLMSG_ALIGN(sizeof(struct nlmsgerr))              \
+			   + NLMSG_ALIGN((inner_len))))
 
 static void netlink_parse_nlattr(struct nlattr **tb, int max,
 				 struct nlattr *nla, int len)
 {
-	while (NL_OK(nla, len)) {
+	while (NLA_OK(nla, len)) {
 		if (nla->nla_type <= max)
 			tb[nla->nla_type] = nla;
-		nla = NL_NEXT(nla, len);
+		nla = NLA_NEXT(nla, len);
 	}
 }
 
 static void netlink_parse_extended_ack(struct nlmsghdr *h)
 {
-	struct nlattr *tb[NLMSGERR_ATTR_MAX + 1];
-	const struct nlmsgerr *err =
-		(const struct nlmsgerr *)((uint8_t *)h
-					  + NLMSG_ALIGN(
-						    sizeof(struct nlmsghdr)));
+	struct nlattr *tb[NLMSGERR_ATTR_MAX + 1] = {};
+	const struct nlmsgerr *err = (const struct nlmsgerr *)NLMSG_DATA(h);
 	const struct nlmsghdr *err_nlh = NULL;
-	uint32_t hlen = sizeof(*err);
+	/* Length not including nlmsghdr */
+	uint32_t len = 0;
+	/* Inner error netlink message length */
+	uint32_t inner_len = 0;
 	const char *msg = NULL;
 	uint32_t off = 0;
 
 	if (!(h->nlmsg_flags & NLM_F_CAPPED))
-		hlen += h->nlmsg_len - NLMSG_ALIGN(sizeof(struct nlmsghdr));
+		inner_len = (uint32_t)NLMSG_PAYLOAD(&err->msg, 0);
 
-	memset(tb, 0, sizeof(tb));
-	netlink_parse_nlattr(tb, NLMSGERR_ATTR_MAX, NL_RTA(h), hlen);
+	len = (uint32_t)(NLMSG_PAYLOAD(h, sizeof(struct nlmsgerr)) - inner_len);
+
+	netlink_parse_nlattr(tb, NLMSGERR_ATTR_MAX, ERR_NLA(err, inner_len),
+			     len);
 
 	if (tb[NLMSGERR_ATTR_MSG])
-		msg = (const char *)RTA_DATA(tb[NLMSGERR_ATTR_MSG]);
+		msg = (const char *)NLA_DATA(tb[NLMSGERR_ATTR_MSG]);
 
 	if (tb[NLMSGERR_ATTR_OFFS]) {
-		off = *(uint32_t *)RTA_DATA(tb[NLMSGERR_ATTR_OFFS]);
+		off = *(uint32_t *)NLA_DATA(tb[NLMSGERR_ATTR_OFFS]);
 
 		if (off > h->nlmsg_len) {
-			zlog_err("Invalid offset for NLMSGERR_ATTR_OFFS\n");
+			zlog_err("Invalid offset for NLMSGERR_ATTR_OFFS");
 		} else if (!(h->nlmsg_flags & NLM_F_CAPPED)) {
 			/*
 			 * Header of failed message
@@ -973,7 +989,7 @@ int netlink_talk_info(int (*filter)(struct nlmsghdr *, ns_id_t, int startup),
 			n->nlmsg_flags);
 
 	/* Send message to netlink interface. */
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 		status = sendmsg(nl->sock, &msg, 0);
 		save_errno = errno;
 	}
@@ -1040,7 +1056,7 @@ int netlink_request(struct nlsock *nl, struct nlmsghdr *n)
 	snl.nl_family = AF_NETLINK;
 
 	/* Raise capabilities and send message, then lower capabilities. */
-	frr_elevate_privs(&zserv_privs) {
+	frr_with_privs(&zserv_privs) {
 		ret = sendto(nl->sock, (void *)n, n->nlmsg_len, 0,
 			     (struct sockaddr *)&snl, sizeof snl);
 	}

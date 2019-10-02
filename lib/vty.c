@@ -42,9 +42,14 @@
 #include "frrstr.h"
 #include "lib_errors.h"
 #include "northbound_cli.h"
+#include "printfrr.h"
 
 #include <arpa/telnet.h>
 #include <termios.h>
+
+#ifndef VTYSH_EXTRACT_PL
+#include "lib/vty_clippy.c"
+#endif
 
 DEFINE_MTYPE_STATIC(LIB, VTY, "VTY")
 DEFINE_MTYPE_STATIC(LIB, VTY_OUT_BUF, "VTY output buffer")
@@ -84,26 +89,24 @@ static char *vty_ipv6_accesslist_name = NULL;
 static vector Vvty_serv_thread;
 
 /* Current directory. */
-char *vty_cwd = NULL;
-
-/* Exclusive configuration lock. */
-struct vty *vty_exclusive_lock;
+char vty_cwd[MAXPATHLEN];
 
 /* Login password check. */
 static int no_password_check = 0;
 
 /* Integrated configuration file path */
-char integrate_default[] = SYSCONFDIR INTEGRATE_DEFAULT_CONFIG;
+static char integrate_default[] = SYSCONFDIR INTEGRATE_DEFAULT_CONFIG;
 
-static int do_log_commands = 0;
+static bool do_log_commands;
+static bool do_log_commands_perm;
 
 void vty_frame(struct vty *vty, const char *format, ...)
 {
 	va_list args;
 
 	va_start(args, format);
-	vsnprintf(vty->frame + vty->frame_pos,
-		  sizeof(vty->frame) - vty->frame_pos, format, args);
+	vsnprintfrr(vty->frame + vty->frame_pos,
+		    sizeof(vty->frame) - vty->frame_pos, format, args);
 	vty->frame_pos = strlen(vty->frame);
 	va_end(args);
 }
@@ -146,8 +149,7 @@ bool vty_set_include(struct vty *vty, const char *regexp)
 int vty_out(struct vty *vty, const char *format, ...)
 {
 	va_list args;
-	int len = 0;
-	int size = 1024;
+	ssize_t len;
 	char buf[1024];
 	char *p = NULL;
 	char *filtered;
@@ -157,35 +159,11 @@ int vty_out(struct vty *vty, const char *format, ...)
 		vty_out(vty, "%s", vty->frame);
 	}
 
-	/* Try to write to initial buffer.  */
 	va_start(args, format);
-	len = vsnprintf(buf, sizeof(buf), format, args);
+	p = vasnprintfrr(MTYPE_VTY_OUT_BUF, buf, sizeof(buf), format, args);
 	va_end(args);
 
-	/* Initial buffer is not enough.  */
-	if (len < 0 || len >= size) {
-		while (1) {
-			if (len > -1)
-				size = len + 1;
-			else
-				size = size * 2;
-
-			p = XREALLOC(MTYPE_VTY_OUT_BUF, p, size);
-			if (!p)
-				return -1;
-
-			va_start(args, format);
-			len = vsnprintf(p, size, format, args);
-			va_end(args);
-
-			if (len > -1 && len < size)
-				break;
-		}
-	}
-
-	/* When initial buffer is enough to store all output.  */
-	if (!p)
-		p = buf;
+	len = strlen(p);
 
 	/* filter buffer */
 	if (vty->filter) {
@@ -272,8 +250,8 @@ done:
 }
 
 static int vty_log_out(struct vty *vty, const char *level,
-		       const char *proto_str, const char *format,
-		       struct timestamp_control *ctl, va_list va)
+		       const char *proto_str, const char *msg,
+		       struct timestamp_control *ctl)
 {
 	int ret;
 	int len;
@@ -298,7 +276,7 @@ static int vty_log_out(struct vty *vty, const char *level,
 	if ((ret < 0) || ((size_t)(len += ret) >= sizeof(buf)))
 		return -1;
 
-	if (((ret = vsnprintf(buf + len, sizeof(buf) - len, format, va)) < 0)
+	if (((ret = snprintf(buf + len, sizeof(buf) - len, "%s", msg)) < 0)
 	    || ((size_t)((len += ret) + 2) > sizeof(buf)))
 		return -1;
 
@@ -359,7 +337,8 @@ void vty_hello(struct vty *vty)
 				/* work backwards to ignore trailling isspace()
 				 */
 				for (s = buf + strlen(buf);
-				     (s > buf) && isspace((int)*(s - 1)); s--)
+				     (s > buf) && isspace((unsigned char)s[-1]);
+				     s--)
 					;
 				*s = '\0';
 				vty_out(vty, "%s\n", buf);
@@ -369,6 +348,15 @@ void vty_hello(struct vty *vty)
 			vty_out(vty, "MOTD file not found\n");
 	} else if (host.motd)
 		vty_out(vty, "%s", host.motd);
+
+#if CONFDATE > 20200901
+	CPP_NOTICE("Please remove solaris code from system as it is deprecated");
+#endif
+#ifdef SUNOS_5
+	zlog_warn("If you are using FRR on Solaris, the FRR developers would love to hear from you\n");
+	zlog_warn("Please send email to dev@lists.frrouting.org about this message\n");
+	zlog_warn("We are considering deprecating Solaris and want to find users of Solaris systems\n");
+#endif
 }
 
 /* Put out prompt and wait input from user. */
@@ -490,7 +478,7 @@ static int vty_command(struct vty *vty, char *buf)
 		cp = buf;
 	if (cp != NULL) {
 		/* Skip white spaces. */
-		while (isspace((int)*cp) && *cp != '\0')
+		while (isspace((unsigned char)*cp) && *cp != '\0')
 			cp++;
 	}
 	if (cp != NULL && *cp != '\0') {
@@ -914,7 +902,7 @@ static void vty_complete_command(struct vty *vty)
 		return;
 
 	/* In case of 'help \t'. */
-	if (isspace((int)vty->buf[vty->length - 1]))
+	if (isspace((unsigned char)vty->buf[vty->length - 1]))
 		vector_set(vline, NULL);
 
 	matched = cmd_complete_command(vline, vty, &ret);
@@ -974,8 +962,7 @@ static void vty_complete_command(struct vty *vty)
 	default:
 		break;
 	}
-	if (matched)
-		XFREE(MTYPE_TMP, matched);
+	XFREE(MTYPE_TMP, matched);
 }
 
 static void vty_describe_fold(struct vty *vty, int cmd_width,
@@ -1002,7 +989,7 @@ static void vty_describe_fold(struct vty *vty, int cmd_width,
 		if (pos == 0)
 			break;
 
-		strncpy(buf, p, pos);
+		memcpy(buf, p, pos);
 		buf[pos] = '\0';
 		vty_out(vty, "  %-*s  %s\n", cmd_width, cmd, buf);
 
@@ -1029,7 +1016,7 @@ static void vty_describe_command(struct vty *vty)
 	if (vline == NULL) {
 		vline = vector_init(1);
 		vector_set(vline, NULL);
-	} else if (isspace((int)vty->buf[vty->length - 1]))
+	} else if (isspace((unsigned char)vty->buf[vty->length - 1]))
 		vector_set(vline, NULL);
 
 	describe = cmd_describe_command(vline, vty, &ret);
@@ -1169,8 +1156,7 @@ static void vty_hist_add(struct vty *vty)
 		}
 
 	/* Insert history entry. */
-	if (vty->hist[vty->hindex])
-		XFREE(MTYPE_VTY_HIST, vty->hist[vty->hindex]);
+	XFREE(MTYPE_VTY_HIST, vty->hist[vty->hindex]);
 	vty->hist[vty->hindex] = XSTRDUP(MTYPE_VTY_HIST, vty->buf);
 
 	/* History index rotation. */
@@ -1359,7 +1345,6 @@ static int vty_read(struct thread *thread)
 
 	int vty_sock = THREAD_FD(thread);
 	struct vty *vty = THREAD_ARG(thread);
-	vty->t_read = NULL;
 
 	/* Read raw data from socket */
 	if ((nbytes = read(vty->fd, buf, VTY_READ_BUFSIZ)) <= 0) {
@@ -1553,13 +1538,9 @@ static int vty_flush(struct thread *thread)
 	int vty_sock = THREAD_FD(thread);
 	struct vty *vty = THREAD_ARG(thread);
 
-	vty->t_write = NULL;
-
 	/* Tempolary disable read thread. */
-	if ((vty->lines == 0) && vty->t_read) {
-		thread_cancel(vty->t_read);
-		vty->t_read = NULL;
-	}
+	if (vty->lines == 0)
+		THREAD_OFF(vty->t_read);
 
 	/* Function execution continue. */
 	erase = ((vty->status == VTY_MORE || vty->status == VTY_MORELINE));
@@ -1664,7 +1645,7 @@ static struct vty *vty_create(int vty_sock, union sockunion *su)
 
 	/* configurable parameters not part of basic init */
 	vty->v_timeout = vty_timeout_val;
-	strcpy(vty->address, buf);
+	strlcpy(vty->address, buf, sizeof(vty->address));
 	if (no_password_check) {
 		if (host.advanced)
 			vty->node = ENABLE_NODE;
@@ -1737,12 +1718,9 @@ void vty_stdio_suspend(void)
 	if (!stdio_vty)
 		return;
 
-	if (stdio_vty->t_write)
-		thread_cancel(stdio_vty->t_write);
-	if (stdio_vty->t_read)
-		thread_cancel(stdio_vty->t_read);
-	if (stdio_vty->t_timeout)
-		thread_cancel(stdio_vty->t_timeout);
+	THREAD_OFF(stdio_vty->t_write);
+	THREAD_OFF(stdio_vty->t_read);
+	THREAD_OFF(stdio_vty->t_timeout);
 
 	if (stdio_termios)
 		tcsetattr(0, TCSANOW, &stdio_orig_termios);
@@ -1800,7 +1778,7 @@ struct vty *vty_stdio(void (*atclose)(int isexit))
 	 */
 	vty->node = ENABLE_NODE;
 	vty->v_timeout = 0;
-	strcpy(vty->address, "console");
+	strlcpy(vty->address, "console", sizeof(vty->address));
 
 	vty_stdio_resume();
 	return vty;
@@ -2101,7 +2079,6 @@ static int vtysh_read(struct thread *thread)
 
 	sock = THREAD_FD(thread);
 	vty = THREAD_ARG(thread);
-	vty->t_read = NULL;
 
 	if ((nbytes = read(sock, buf, VTY_READ_BUFSIZ)) <= 0) {
 		if (nbytes < 0) {
@@ -2181,7 +2158,6 @@ static int vtysh_write(struct thread *thread)
 {
 	struct vty *vty = THREAD_ARG(thread);
 
-	vty->t_write = NULL;
 	vtysh_flush(vty);
 	return 0;
 }
@@ -2217,12 +2193,9 @@ void vty_close(struct vty *vty)
 	bool was_stdio = false;
 
 	/* Cancel threads.*/
-	if (vty->t_read)
-		thread_cancel(vty->t_read);
-	if (vty->t_write)
-		thread_cancel(vty->t_write);
-	if (vty->t_timeout)
-		thread_cancel(vty->t_timeout);
+	THREAD_OFF(vty->t_read);
+	THREAD_OFF(vty->t_write);
+	THREAD_OFF(vty->t_timeout);
 
 	/* Flush buffer. */
 	buffer_flush_all(vty->obuf, vty->wfd);
@@ -2232,9 +2205,9 @@ void vty_close(struct vty *vty)
 	buffer_free(vty->lbuf);
 
 	/* Free command history. */
-	for (i = 0; i < VTY_MAXHIST; i++)
-		if (vty->hist[i])
-			XFREE(MTYPE_VTY_HIST, vty->hist[i]);
+	for (i = 0; i < VTY_MAXHIST; i++) {
+		XFREE(MTYPE_VTY_HIST, vty->hist[i]);
+	}
 
 	/* Unset vector. */
 	if (vty->fd != -1)
@@ -2255,8 +2228,7 @@ void vty_close(struct vty *vty)
 	if (vty->fd == STDIN_FILENO)
 		was_stdio = true;
 
-	if (vty->buf)
-		XFREE(MTYPE_VTY, vty->buf);
+	XFREE(MTYPE_VTY, vty->buf);
 
 	if (vty->error) {
 		vty->error->del = vty_error_delete;
@@ -2279,7 +2251,6 @@ static int vty_timeout(struct thread *thread)
 	struct vty *vty;
 
 	vty = THREAD_ARG(thread);
-	vty->t_timeout = NULL;
 	vty->v_timeout = 0;
 
 	/* Clear buffer*/
@@ -2314,6 +2285,7 @@ static void vty_read_file(struct nb_config *config, FILE *confp)
 	vty->wfd = STDERR_FILENO;
 	vty->type = VTY_FILE;
 	vty->node = CONFIG_NODE;
+	vty->config = true;
 	if (config)
 		vty->candidate_config = config;
 	else {
@@ -2372,7 +2344,7 @@ static void vty_read_file(struct nb_config *config, FILE *confp)
 	if (config == NULL && vty->candidate_config
 	    && frr_get_cli_mode() == FRR_CLI_TRANSACTIONAL) {
 		ret = nb_candidate_commit(vty->candidate_config, NB_CLIENT_CLI,
-					  true, "Read configuration file",
+					  vty, true, "Read configuration file",
 					  NULL);
 		if (ret != NB_OK && ret != NB_ERR_NO_CHANGES)
 			zlog_err("%s: failed to read configuration file.",
@@ -2390,9 +2362,10 @@ static FILE *vty_use_backup_config(const char *fullpath)
 	int c;
 	char buffer[512];
 
-	fullpath_sav = malloc(strlen(fullpath) + strlen(CONF_BACKUP_EXT) + 1);
-	strcpy(fullpath_sav, fullpath);
-	strcat(fullpath_sav, CONF_BACKUP_EXT);
+	size_t fullpath_sav_sz = strlen(fullpath) + strlen(CONF_BACKUP_EXT) + 1;
+	fullpath_sav = malloc(fullpath_sav_sz);
+	strlcpy(fullpath_sav, fullpath, fullpath_sav_sz);
+	strlcat(fullpath_sav, CONF_BACKUP_EXT, fullpath_sav_sz);
 
 	sav = open(fullpath_sav, O_RDONLY);
 	if (sav < 0) {
@@ -2546,15 +2519,14 @@ bool vty_read_config(struct nb_config *config, const char *config_file,
 	host_config_set(fullpath);
 
 tmp_free_and_out:
-	if (tmp)
-		XFREE(MTYPE_TMP, tmp);
+	XFREE(MTYPE_TMP, tmp);
 
 	return read_success;
 }
 
 /* Small utility function which output log to the VTY. */
-void vty_log(const char *level, const char *proto_str, const char *format,
-	     struct timestamp_control *ctl, va_list va)
+void vty_log(const char *level, const char *proto_str, const char *msg,
+	     struct timestamp_control *ctl)
 {
 	unsigned int i;
 	struct vty *vty;
@@ -2564,13 +2536,8 @@ void vty_log(const char *level, const char *proto_str, const char *format,
 
 	for (i = 0; i < vector_active(vtyvec); i++)
 		if ((vty = vector_slot(vtyvec, i)) != NULL)
-			if (vty->monitor) {
-				va_list ac;
-				va_copy(ac, va);
-				vty_log_out(vty, level, proto_str, format, ctl,
-					    ac);
-				va_end(ac);
-			}
+			if (vty->monitor)
+				vty_log_out(vty, level, proto_str, msg, ctl);
 }
 
 /* Async-signal-safe version of vty_log for fixed strings. */
@@ -2605,8 +2572,8 @@ void vty_log_fixed(char *buf, size_t len)
 
 int vty_config_enter(struct vty *vty, bool private_config, bool exclusive)
 {
-	if (exclusive && !vty_config_exclusive_lock(vty)) {
-		vty_out(vty, "VTY configuration is locked by other VTY\n");
+	if (exclusive && nb_running_lock(NB_CLIENT_CLI, vty)) {
+		vty_out(vty, "%% Configuration is locked by other client\n");
 		return CMD_WARNING;
 	}
 
@@ -2640,7 +2607,7 @@ void vty_config_exit(struct vty *vty)
 		nb_cli_confirmed_commit_clean(vty);
 	}
 
-	vty_config_exclusive_unlock(vty);
+	(void)nb_running_unlock(NB_CLIENT_CLI, vty);
 
 	if (vty->candidate_config) {
 		if (vty->private_config)
@@ -2653,21 +2620,6 @@ void vty_config_exit(struct vty *vty)
 	}
 
 	vty->config = false;
-}
-
-int vty_config_exclusive_lock(struct vty *vty)
-{
-	if (vty_exclusive_lock == NULL) {
-		vty_exclusive_lock = vty;
-		return 1;
-	}
-	return 0;
-}
-
-void vty_config_exclusive_unlock(struct vty *vty)
-{
-	if (vty_exclusive_lock == vty)
-		vty_exclusive_lock = NULL;
 }
 
 /* Master of the threads. */
@@ -2690,25 +2642,20 @@ static void vty_event(enum event event, int sock, struct vty *vty)
 		vector_set_index(Vvty_serv_thread, sock, vty_serv_thread);
 		break;
 	case VTYSH_READ:
-		vty->t_read = NULL;
 		thread_add_read(vty_master, vtysh_read, vty, sock,
 				&vty->t_read);
 		break;
 	case VTYSH_WRITE:
-		vty->t_write = NULL;
 		thread_add_write(vty_master, vtysh_write, vty, sock,
 				 &vty->t_write);
 		break;
 #endif /* VTYSH */
 	case VTY_READ:
-		vty->t_read = NULL;
 		thread_add_read(vty_master, vty_read, vty, sock, &vty->t_read);
 
 		/* Time out treatment. */
 		if (vty->v_timeout) {
-			if (vty->t_timeout)
-				thread_cancel(vty->t_timeout);
-			vty->t_timeout = NULL;
+			THREAD_OFF(vty->t_timeout);
 			thread_add_timer(vty_master, vty_timeout, vty,
 					 vty->v_timeout, &vty->t_timeout);
 		}
@@ -2718,15 +2665,10 @@ static void vty_event(enum event event, int sock, struct vty *vty)
 				 &vty->t_write);
 		break;
 	case VTY_TIMEOUT_RESET:
-		if (vty->t_timeout) {
-			thread_cancel(vty->t_timeout);
-			vty->t_timeout = NULL;
-		}
-		if (vty->v_timeout) {
-			vty->t_timeout = NULL;
+		THREAD_OFF(vty->t_timeout);
+		if (vty->v_timeout)
 			thread_add_timer(vty_master, vty_timeout, vty,
 					 vty->v_timeout, &vty->t_timeout);
-		}
 		break;
 	}
 }
@@ -2991,13 +2933,24 @@ DEFUN_NOSH (show_history,
 }
 
 /* vty login. */
-DEFUN (log_commands,
+DEFPY (log_commands,
        log_commands_cmd,
-       "log commands",
+       "[no] log commands",
+       NO_STR
        "Logging control\n"
-       "Log all commands (can't be unset without restart)\n")
+       "Log all commands\n")
 {
-	do_log_commands = 1;
+	if (no) {
+		if (do_log_commands_perm) {
+			vty_out(vty,
+				"Daemon started with permanent logging turned on for commands, ignoring\n");
+			return CMD_WARNING;
+		}
+
+		do_log_commands = false;
+	} else
+		do_log_commands = true;
+
 	return CMD_SUCCESS;
 }
 
@@ -3052,7 +3005,7 @@ void vty_reset(void)
 	for (i = 0; i < vector_active(Vvty_serv_thread); i++)
 		if ((vty_serv_thread = vector_slot(Vvty_serv_thread, i))
 		    != NULL) {
-			thread_cancel(vty_serv_thread);
+			THREAD_OFF(vty_serv_thread);
 			vector_slot(Vvty_serv_thread, i) = NULL;
 			close(i);
 		}
@@ -3072,10 +3025,9 @@ void vty_reset(void)
 
 static void vty_save_cwd(void)
 {
-	char cwd[MAXPATHLEN];
 	char *c;
 
-	c = getcwd(cwd, MAXPATHLEN);
+	c = getcwd(vty_cwd, sizeof(vty_cwd));
 
 	if (!c) {
 		/*
@@ -3089,15 +3041,12 @@ static void vty_save_cwd(void)
 				     SYSCONFDIR, errno);
 			exit(-1);
 		}
-		if (getcwd(cwd, MAXPATHLEN) == NULL) {
+		if (getcwd(vty_cwd, sizeof(vty_cwd)) == NULL) {
 			flog_err_sys(EC_LIB_SYSTEM_CALL,
 				     "Failure to getcwd, errno: %d", errno);
 			exit(-1);
 		}
 	}
-
-	vty_cwd = XMALLOC(MTYPE_TMP, strlen(cwd) + 1);
-	strcpy(vty_cwd, cwd);
 }
 
 char *vty_get_cwd(void)
@@ -3121,7 +3070,7 @@ void vty_init_vtysh(void)
 }
 
 /* Install vty's own commands like `who' command. */
-void vty_init(struct thread_master *master_thread)
+void vty_init(struct thread_master *master_thread, bool do_command_logging)
 {
 	/* For further configuration read, preserve current directory. */
 	vty_save_cwd();
@@ -3145,6 +3094,12 @@ void vty_init(struct thread_master *master_thread)
 	install_element(CONFIG_NODE, &no_service_advanced_vty_cmd);
 	install_element(CONFIG_NODE, &show_history_cmd);
 	install_element(CONFIG_NODE, &log_commands_cmd);
+
+	if (do_command_logging) {
+		do_log_commands = true;
+		do_log_commands_perm = true;
+	}
+
 	install_element(ENABLE_NODE, &terminal_monitor_cmd);
 	install_element(ENABLE_NODE, &terminal_no_monitor_cmd);
 	install_element(ENABLE_NODE, &no_terminal_monitor_cmd);
@@ -3163,8 +3118,7 @@ void vty_init(struct thread_master *master_thread)
 
 void vty_terminate(void)
 {
-	if (vty_cwd)
-		XFREE(MTYPE_TMP, vty_cwd);
+	memset(vty_cwd, 0x00, sizeof(vty_cwd));
 
 	if (vtyvec && Vvty_serv_thread) {
 		vty_reset();

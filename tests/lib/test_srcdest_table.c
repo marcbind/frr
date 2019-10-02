@@ -81,9 +81,9 @@ static char *format_srcdest(const struct prefix_ipv6 *dst_p,
 	return rv;
 }
 
-static unsigned int log_key(void *data)
+static unsigned int log_key(const void *data)
 {
-	struct prefix *hash_entry = data;
+	const struct prefix *hash_entry = data;
 	struct prefix_ipv6 *dst_p = (struct prefix_ipv6 *)&hash_entry[0];
 	struct prefix_ipv6 *src_p = (struct prefix_ipv6 *)&hash_entry[1];
 	unsigned int hash = 0;
@@ -105,7 +105,7 @@ static unsigned int log_key(void *data)
 static bool log_cmp(const void *a, const void *b)
 {
 	if (a == NULL || b == NULL)
-		return 0;
+		return false;
 
 	return !memcmp(a, b, 2 * sizeof(struct prefix));
 }

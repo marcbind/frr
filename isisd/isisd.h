@@ -31,7 +31,7 @@
 #include "isisd/isis_pdu_counter.h"
 #include "isisd/isis_circuit.h"
 #include "isis_flags.h"
-#include "dict.h"
+#include "isis_lsp.h"
 #include "isis_memory.h"
 #include "qobj.h"
 
@@ -58,19 +58,18 @@ extern struct zebra_privs_t isisd_privs;
 
 /* uncomment if you are a developer in bug hunt */
 /* #define EXTREME_DEBUG  */
-/* #define EXTREME_DICT_DEBUG */
 
 struct fabricd;
 
 struct isis {
+	vrf_id_t vrf_id;
 	unsigned long process_id;
 	int sysid_set;
 	uint8_t sysid[ISIS_SYS_ID_LEN]; /* SystemID for this IS */
 	uint32_t router_id;		/* Router ID from zebra */
 	struct list *area_list;	/* list of IS-IS areas */
 	struct list *init_circ_list;
-	struct list *nexthops;		  /* IPv4 next hops from this IS */
-	struct list *nexthops6;		  /* IPv6 next hops from this IS */
+	struct list *nexthops;		  /* IP next hops from this IS */
 	uint8_t max_area_addrs;		  /* maximumAreaAdresses */
 	struct area_addr *man_area_addrs; /* manualAreaAddresses */
 	uint32_t debugs;		  /* bitmap for debug */
@@ -107,7 +106,7 @@ enum isis_metric_style {
 
 struct isis_area {
 	struct isis *isis;			       /* back pointer */
-	dict_t *lspdb[ISIS_LEVELS];		       /* link-state dbs */
+	struct lspdb_head lspdb[ISIS_LEVELS];	       /* link-state dbs */
 	struct isis_spftree *spftree[SPFTREE_COUNT][ISIS_LEVELS];
 #define DEFAULT_LSP_MTU 1497
 	unsigned int lsp_mtu;      /* Size of LSPs to generate */
@@ -165,6 +164,8 @@ struct isis_area {
 	uint8_t log_adj_changes;
 	/* multi topology settings */
 	struct list *mt_settings;
+	/* MPLS-TE settings */
+	struct mpls_te_area *mta;
 	int ipv6_circuits;
 	bool purge_originator;
 	/* Counters */
@@ -189,13 +190,13 @@ struct isis_area {
 DECLARE_QOBJ_TYPE(isis_area)
 
 void isis_init(void);
-void isis_new(unsigned long);
+void isis_new(unsigned long process_id, vrf_id_t vrf_id);
 struct isis_area *isis_area_create(const char *);
 struct isis_area *isis_area_lookup(const char *);
 int isis_area_get(struct vty *vty, const char *area_tag);
 int isis_area_destroy(const char *area_tag);
 void print_debug(struct vty *, int, int);
-struct isis_lsp *lsp_for_arg(const char *argv, dict_t *lspdb);
+struct isis_lsp *lsp_for_arg(struct lspdb_head *head, const char *argv);
 
 void isis_area_invalidate_routes(struct isis_area *area, int levels);
 void isis_area_verify_routes(struct isis_area *area);

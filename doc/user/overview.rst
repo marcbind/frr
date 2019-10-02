@@ -107,14 +107,13 @@ An illustration of the large scale architecture is given below.
 
 
 The multi-process architecture brings extensibility, modularity and
-maintainability. At the same time it also brings many configuration files and
-terminal interfaces. Each daemon has its own configuration file and terminal
-interface. When you configure a static route, it must be done in the *Zebra*
-configuration file. When you configure BGP network it must be done in the
-*bgpd* configuration file. This can become difficult to manage. To resolve the
-problem, FRR provides integrated user interface shell called *vtysh*. *vtysh*
-connects to each daemon with UNIX domain socket and then works as a proxy for
-user input.
+maintainability.  All of the FRR daemons can be managed through a single
+integrated user interface shell called *vtysh*.  *vtysh* connects to each
+daemon through a UNIX domain socket and then works as a proxy for user input.
+In addition to a unified frontend, *vtysh* also provides the ability to
+configure all the daemons using a single configuration file through the
+integrated configuration mode avoiding the problem of having to maintain a
+separate configuration file for each daemon.
 
 Supported Platforms
 ===================
@@ -229,6 +228,8 @@ features with system dependencies are included here.
 +-----------------------------------+----------------+--------------+------------+------------+------------+
 |    ASM (Any Source)               | :mark:`Y`      | :mark:`N`    | :mark:`N`  | :mark:`N`  | :mark:`N`  |
 +-----------------------------------+----------------+--------------+------------+------------+------------+
+|    EVPN BUM Forwarding            | :mark:`≥5.0`   | :mark:`N`    | :mark:`N`  | :mark:`N`  | :mark:`N`  |
++-----------------------------------+----------------+--------------+------------+------------+------------+
 
 The indicators have the following semantics:
 
@@ -237,6 +238,15 @@ The indicators have the following semantics:
 * :mark:`†X.X` - restricted functionality or impaired performance with kernel version X.X or newer
 * :mark:`CP` - control plane only (i.e. BGP route server / route reflector)
 * :mark:`N` - daemon/feature not supported by operating system
+
+
+Known Kernel Issues:
+====================
+
+- Linux
+   v6 Route Replacement - Linux kernels before 4.11 can cause issues with v6 route deletion when you
+   have ecmp routes installed into the kernel.  This especially becomes apparent if the route is being
+   transformed from one ecmp path to another.
 
 .. _supported-rfcs:
 

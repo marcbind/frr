@@ -47,6 +47,7 @@
 #include "pim_nht.h"
 #include "pim_jp_agg.h"
 #include "pim_igmp_join.h"
+#include "pim_vxlan.h"
 
 static void pim_if_igmp_join_del_all(struct interface *ifp);
 static int igmp_join_sock(const char *ifname, ifindex_t ifindex,
@@ -109,7 +110,7 @@ static int pim_sec_addr_comp(const void *p1, const void *p2)
 }
 
 struct pim_interface *pim_if_new(struct interface *ifp, bool igmp, bool pim,
-				 bool ispimreg)
+				 bool ispimreg, bool is_vxlan_term)
 {
 	struct pim_interface *pim_ifp;
 
@@ -130,6 +131,12 @@ struct pim_interface *pim_if_new(struct interface *ifp, bool igmp, bool pim,
 		IGMP_QUERY_MAX_RESPONSE_TIME_DSEC;
 	pim_ifp->igmp_specific_query_max_response_time_dsec =
 		IGMP_SPECIFIC_QUERY_MAX_RESPONSE_TIME_DSEC;
+	pim_ifp->igmp_last_member_query_count =
+		IGMP_DEFAULT_ROBUSTNESS_VARIABLE;
+
+	/* BSM config on interface: true by default */
+	pim_ifp->bsm_enable = true;
+	pim_ifp->ucast_bsm_accept = true;
 
 	/*
 	  RFC 3376: 8.3. Query Response Interval
@@ -178,7 +185,7 @@ struct pim_interface *pim_if_new(struct interface *ifp, bool igmp, bool pim,
 
 	pim_sock_reset(ifp);
 
-	pim_if_add_vif(ifp, ispimreg);
+	pim_if_add_vif(ifp, ispimreg, is_vxlan_term);
 
 	return pim_ifp;
 }
@@ -208,8 +215,7 @@ void pim_if_delete(struct interface *ifp)
 	list_delete(&pim_ifp->upstream_switch_list);
 	list_delete(&pim_ifp->sec_addr_list);
 
-	if (pim_ifp->boundary_oil_plist)
-		XFREE(MTYPE_PIM_INTERFACE, pim_ifp->boundary_oil_plist);
+	XFREE(MTYPE_PIM_INTERFACE, pim_ifp->boundary_oil_plist);
 
 	while (!RB_EMPTY(pim_ifchannel_rb, &pim_ifp->ifchannel_rb)) {
 		ch = RB_ROOT(pim_ifchannel_rb, &pim_ifp->ifchannel_rb);
@@ -629,7 +635,7 @@ void pim_if_addr_add(struct connected *ifc)
 	  address assigned, then try to create a vif_index.
 	*/
 	if (pim_ifp->mroute_vif_index < 0) {
-		pim_if_add_vif(ifp, false);
+		pim_if_add_vif(ifp, false, false /*vxlan_term*/);
 	}
 	pim_ifchannel_scan_forward_start(ifp);
 }
@@ -762,7 +768,7 @@ void pim_if_addr_add_all(struct interface *ifp)
 	 * address assigned, then try to create a vif_index.
 	 */
 	if (pim_ifp->mroute_vif_index < 0) {
-		pim_if_add_vif(ifp, false);
+		pim_if_add_vif(ifp, false, false /*vxlan_term*/);
 	}
 	pim_ifchannel_scan_forward_start(ifp);
 
@@ -927,7 +933,7 @@ static int pim_iface_next_vif_index(struct interface *ifp)
 
   see also pim_if_find_vifindex_by_ifindex()
  */
-int pim_if_add_vif(struct interface *ifp, bool ispimreg)
+int pim_if_add_vif(struct interface *ifp, bool ispimreg, bool is_vxlan_term)
 {
 	struct pim_interface *pim_ifp = ifp->info;
 	struct in_addr ifaddr;
@@ -949,7 +955,7 @@ int pim_if_add_vif(struct interface *ifp, bool ispimreg)
 	}
 
 	ifaddr = pim_ifp->primary_address;
-	if (!ispimreg && PIM_INADDR_IS_ANY(ifaddr)) {
+	if (!ispimreg && !is_vxlan_term && PIM_INADDR_IS_ANY(ifaddr)) {
 		zlog_warn(
 			"%s: could not get address for interface %s ifindex=%d",
 			__PRETTY_FUNCTION__, ifp->name, ifp->ifindex);
@@ -978,6 +984,10 @@ int pim_if_add_vif(struct interface *ifp, bool ispimreg)
 	}
 
 	pim_ifp->pim->iface_vif_index[pim_ifp->mroute_vif_index] = 1;
+
+	/* if the device qualifies as pim_vxlan iif/oif update vxlan entries */
+	pim_vxlan_add_vif(ifp);
+
 	return 0;
 }
 
@@ -991,6 +1001,9 @@ int pim_if_del_vif(struct interface *ifp)
 			  ifp->name, ifp->ifindex);
 		return -1;
 	}
+
+	/* if the device was a pim_vxlan iif/oif update vxlan mroute entries */
+	pim_vxlan_del_vif(ifp);
 
 	pim_mroute_del_vif(ifp);
 
@@ -1280,11 +1293,7 @@ ferr_r pim_if_igmp_join_add(struct interface *ifp, struct in_addr group_addr,
 		return ferr_ok();
 	}
 
-	ij = igmp_join_new(ifp, group_addr, source_addr);
-	if (!ij) {
-		return ferr_cfg_invalid(
-			"Failure to create new join data structure, see log file for more information");
-	}
+	(void)igmp_join_new(ifp, group_addr, source_addr);
 
 	if (PIM_DEBUG_IGMP_EVENTS) {
 		char group_str[INET_ADDRSTRLEN];
@@ -1470,7 +1479,8 @@ void pim_if_create_pimreg(struct pim_instance *pim)
 		pim->regiface = if_create(pimreg_name, pim->vrf_id);
 		pim->regiface->ifindex = PIM_OIF_PIM_REGISTER_VIF;
 
-		pim_if_new(pim->regiface, false, false, true);
+		pim_if_new(pim->regiface, false, false, true,
+			false /*vxlan_term*/);
 	}
 }
 
@@ -1515,4 +1525,170 @@ int pim_if_ifchannel_count(struct pim_interface *pim_ifp)
 	}
 
 	return count;
+}
+
+int pim_ifp_create(struct interface *ifp)
+{
+	struct pim_instance *pim;
+
+	pim = pim_get_pim_instance(ifp->vrf_id);
+	if (PIM_DEBUG_ZEBRA) {
+		zlog_debug(
+			"%s: %s index %d(%u) flags %ld metric %d mtu %d operative %d",
+			__PRETTY_FUNCTION__, ifp->name, ifp->ifindex,
+			ifp->vrf_id, (long)ifp->flags, ifp->metric, ifp->mtu,
+			if_is_operative(ifp));
+	}
+
+	if (if_is_operative(ifp)) {
+		struct pim_interface *pim_ifp;
+
+		pim_ifp = ifp->info;
+		/*
+		 * If we have a pim_ifp already and this is an if_add
+		 * that means that we probably have a vrf move event
+		 * If that is the case, set the proper vrfness.
+		 */
+		if (pim_ifp)
+			pim_ifp->pim = pim;
+		pim_if_addr_add_all(ifp);
+	}
+
+	/*
+	 * If we are a vrf device that is up, open up the pim_socket for
+	 * listening
+	 * to incoming pim messages irrelevant if the user has configured us
+	 * for pim or not.
+	 */
+	if (pim_if_is_vrf_device(ifp)) {
+		struct pim_interface *pim_ifp;
+
+		if (!ifp->info) {
+			pim_ifp = pim_if_new(ifp, false, false, false,
+					     false /*vxlan_term*/);
+			ifp->info = pim_ifp;
+		}
+
+		pim_sock_add(ifp);
+	}
+
+	if (!strncmp(ifp->name, PIM_VXLAN_TERM_DEV_NAME,
+		     sizeof(PIM_VXLAN_TERM_DEV_NAME)))
+		pim_vxlan_add_term_dev(pim, ifp);
+
+	return 0;
+}
+
+int pim_ifp_up(struct interface *ifp)
+{
+	struct pim_instance *pim;
+	uint32_t table_id;
+
+	if (PIM_DEBUG_ZEBRA) {
+		zlog_debug(
+			"%s: %s index %d(%u) flags %ld metric %d mtu %d operative %d",
+			__PRETTY_FUNCTION__, ifp->name, ifp->ifindex,
+			ifp->vrf_id, (long)ifp->flags, ifp->metric, ifp->mtu,
+			if_is_operative(ifp));
+	}
+
+	pim = pim_get_pim_instance(ifp->vrf_id);
+	if (if_is_operative(ifp)) {
+		struct pim_interface *pim_ifp;
+
+		pim_ifp = ifp->info;
+		/*
+		 * If we have a pim_ifp already and this is an if_add
+		 * that means that we probably have a vrf move event
+		 * If that is the case, set the proper vrfness.
+		 */
+		if (pim_ifp)
+			pim_ifp->pim = pim;
+
+		/*
+		  pim_if_addr_add_all() suffices for bringing up both IGMP and
+		  PIM
+		*/
+		pim_if_addr_add_all(ifp);
+	}
+
+	/*
+	 * If we have a pimreg device callback and it's for a specific
+	 * table set the master appropriately
+	 */
+	if (sscanf(ifp->name, "pimreg%" SCNu32, &table_id) == 1) {
+		struct vrf *vrf;
+		RB_FOREACH (vrf, vrf_name_head, &vrfs_by_name) {
+			if ((table_id == vrf->data.l.table_id)
+			    && (ifp->vrf_id != vrf->vrf_id)) {
+				struct interface *master = if_lookup_by_name(
+					vrf->name, vrf->vrf_id);
+
+				if (!master) {
+					zlog_debug(
+						"%s: Unable to find Master interface for %s",
+						__PRETTY_FUNCTION__, vrf->name);
+					return 0;
+				}
+				pim_zebra_interface_set_master(master, ifp);
+			}
+		}
+	}
+	return 0;
+}
+
+int pim_ifp_down(struct interface *ifp)
+{
+	if (PIM_DEBUG_ZEBRA) {
+		zlog_debug(
+			"%s: %s index %d(%u) flags %ld metric %d mtu %d operative %d",
+			__PRETTY_FUNCTION__, ifp->name, ifp->ifindex,
+			ifp->vrf_id, (long)ifp->flags, ifp->metric, ifp->mtu,
+			if_is_operative(ifp));
+	}
+
+	if (!if_is_operative(ifp)) {
+		pim_ifchannel_delete_all(ifp);
+		/*
+		  pim_if_addr_del_all() suffices for shutting down IGMP,
+		  but not for shutting down PIM
+		*/
+		pim_if_addr_del_all(ifp);
+
+		/*
+		  pim_sock_delete() closes the socket, stops read and timer
+		  threads,
+		  and kills all neighbors.
+		*/
+		if (ifp->info) {
+			pim_sock_delete(ifp, "link down");
+		}
+	}
+
+	if (ifp->info)
+		pim_if_del_vif(ifp);
+
+	return 0;
+}
+
+int pim_ifp_destroy(struct interface *ifp)
+{
+	struct pim_instance *pim;
+
+	if (PIM_DEBUG_ZEBRA) {
+		zlog_debug(
+			"%s: %s index %d(%u) flags %ld metric %d mtu %d operative %d",
+			__PRETTY_FUNCTION__, ifp->name, ifp->ifindex,
+			ifp->vrf_id, (long)ifp->flags, ifp->metric, ifp->mtu,
+			if_is_operative(ifp));
+	}
+
+	if (!if_is_operative(ifp))
+		pim_if_addr_del_all(ifp);
+
+	pim = pim_get_pim_instance(ifp->vrf_id);
+	if (pim && pim->vxlan.term_if == ifp)
+		pim_vxlan_del_term_dev(pim);
+
+	return 0;
 }

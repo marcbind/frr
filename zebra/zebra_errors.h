@@ -23,6 +23,10 @@
 
 #include "lib/ferr.h"
 
+#ifdef __cplusplus
+extern "C" {
+#endif
+
 enum zebra_log_refs {
 	EC_ZEBRA_LM_RESPONSE = ZEBRA_FERR_START,
 	EC_ZEBRA_LM_NO_SUCH_CLIENT,
@@ -81,7 +85,6 @@ enum zebra_log_refs {
 	EC_ZEBRA_IRDP_BAD_CHECKSUM,
 	EC_ZEBRA_IRDP_BAD_TYPE_CODE,
 	EC_ZEBRA_IRDP_BAD_RX_FLAGS,
-	EC_ZEBRA_IRDP_BAD_TYPE,
 	EC_ZEBRA_RNH_NO_TABLE,
 	EC_ZEBRA_IFLIST_FAILED,
 	EC_ZEBRA_FPM_FORMAT_UNKNOWN,
@@ -125,5 +128,9 @@ enum zebra_log_refs {
 };
 
 void zebra_error_init(void);
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* __EC_ZEBRAORS_H__ */

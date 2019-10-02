@@ -3,7 +3,7 @@
 Memtypes
 ========
 
-FRR includes wrappers arround ``malloc()`` and ``free()`` that count the number
+FRR includes wrappers around ``malloc()`` and ``free()`` that count the number
 of objects currently allocated, for each of a defined ``MTYPE``.
 
 To this extent, there are *memory groups* and *memory types*.  Each memory
@@ -41,6 +41,16 @@ Example:
 
 Definition
 ----------
+
+.. c:type:: struct memtype
+
+   This is the (internal) type used for MTYPE definitions.  The macros below
+   should be used to create these, but in some cases it is useful to pass a
+   ``struct memtype *`` pointer to some helper function.
+
+   The ``MTYPE_name`` created by the macros is declared as an array, i.e.
+   a function taking a ``struct memtype *`` argument can be called with an
+   ``MTYPE_name`` argument (as opposed to ``&MTYPE_name``.)
 
 .. c:macro:: DECLARE_MGROUP(name)
 

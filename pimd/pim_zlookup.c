@@ -37,8 +37,10 @@
 #include "pim_zlookup.h"
 
 static struct zclient *zlookup = NULL;
+struct thread *zlookup_read;
 
 static void zclient_lookup_sched(struct zclient *zlookup, int delay);
+static int zclient_lookup_read_pipe(struct thread *thread);
 
 /* Connect to zebra for nexthop lookup. */
 static int zclient_lookup_connect(struct thread *t)
@@ -65,6 +67,8 @@ static int zclient_lookup_connect(struct thread *t)
 		return -1;
 	}
 
+	thread_add_timer(router->master, zclient_lookup_read_pipe, zlookup, 60,
+			 &zlookup_read);
 	return 0;
 }
 
@@ -113,6 +117,7 @@ static void zclient_lookup_failed(struct zclient *zlookup)
 
 void zclient_lookup_free(void)
 {
+	thread_cancel(zlookup_read);
 	zclient_stop(zlookup);
 	zclient_free(zlookup);
 	zlookup = NULL;
@@ -357,6 +362,20 @@ static int zclient_lookup_nexthop_once(struct pim_instance *pim,
 	return zclient_read_nexthop(pim, zlookup, nexthop_tab, tab_size, addr);
 }
 
+int zclient_lookup_read_pipe(struct thread *thread)
+{
+	struct zclient *zlookup = THREAD_ARG(thread);
+	struct pim_instance *pim = pim_get_pim_instance(VRF_DEFAULT);
+	struct pim_zlookup_nexthop nexthop_tab[10];
+	struct in_addr l = {.s_addr = INADDR_ANY};
+
+	zclient_lookup_nexthop_once(pim, nexthop_tab, 10, l);
+	thread_add_timer(router->master, zclient_lookup_read_pipe, zlookup, 60,
+			 &zlookup_read);
+
+	return 1;
+}
+
 int zclient_lookup_nexthop(struct pim_instance *pim,
 			   struct pim_zlookup_nexthop nexthop_tab[],
 			   const int tab_size, struct in_addr addr,
@@ -499,7 +518,7 @@ int pim_zlookup_sg_statistics(struct channel_oil *c_oil)
 		more.src = c_oil->oil.mfcc_origin;
 		more.grp = c_oil->oil.mfcc_mcastgrp;
 		zlog_debug(
-			"Sending Request for New Channel Oil Information(%s) VIIF %d(%s)",
+			"Sending Request for New Channel Oil Information%s VIIF %d(%s)",
 			pim_str_sg_dump(&more), c_oil->oil.mfcc_parent,
 			c_oil->pim->vrf->name);
 	}

@@ -324,8 +324,9 @@ static int subgroup_coalesce_timer(struct thread *thread)
 	subgrp = THREAD_ARG(thread);
 	if (bgp_debug_update(NULL, NULL, subgrp->update_group, 0))
 		zlog_debug("u%" PRIu64 ":s%" PRIu64
-			   " announcing routes upon coalesce timer expiry",
-			   (SUBGRP_UPDGRP(subgrp))->id, subgrp->id);
+			   " announcing routes upon coalesce timer expiry(%u ms)",
+			   (SUBGRP_UPDGRP(subgrp))->id, subgrp->id,
+			   subgrp->v_coalesce),
 	subgrp->t_coalesce = NULL;
 	subgrp->v_coalesce = 0;
 	subgroup_announce_route(subgrp);
@@ -422,7 +423,7 @@ bgp_advertise_clean_subgroup(struct update_subgroup *subgrp,
 	struct bgp_advertise *adv;
 	struct bgp_advertise_attr *baa;
 	struct bgp_advertise *next;
-	struct bgp_advertise_fifo *fhead;
+	struct bgp_adv_fifo_head *fhead;
 
 	adv = adj->adv;
 	baa = adv->baa;
@@ -444,7 +445,7 @@ bgp_advertise_clean_subgroup(struct update_subgroup *subgrp,
 
 
 	/* Unlink myself from advertisement FIFO.  */
-	BGP_ADV_FIFO_DEL(fhead, adv);
+	bgp_adv_fifo_del(fhead, adv);
 
 	/* Free memory.  */
 	bgp_advertise_free(adj->adv);
@@ -507,7 +508,7 @@ void bgp_adj_out_set_subgroup(struct bgp_node *rn,
 	 * If the update adv list is empty, trigger the member peers'
 	 * mrai timers so the socket writes can happen.
 	 */
-	if (BGP_ADV_FIFO_EMPTY(&subgrp->sync->update)) {
+	if (!bgp_adv_fifo_count(&subgrp->sync->update)) {
 		struct peer_af *paf;
 
 		SUBGRP_FOREACH_PEER (subgrp, paf) {
@@ -515,7 +516,7 @@ void bgp_adj_out_set_subgroup(struct bgp_node *rn,
 		}
 	}
 
-	BGP_ADV_FIFO_ADD(&subgrp->sync->update, &adv->fifo);
+	bgp_adv_fifo_add_tail(&subgrp->sync->update, adv);
 
 	subgrp->version = max(subgrp->version, rn->version);
 }
@@ -550,11 +551,11 @@ void bgp_adj_out_unset_subgroup(struct bgp_node *rn,
 
 			/* Note if we need to trigger a packet write */
 			trigger_write =
-				BGP_ADV_FIFO_EMPTY(&subgrp->sync->withdraw);
+				!bgp_adv_fifo_count(&subgrp->sync->withdraw);
 
 			/* Add to synchronization entry for withdraw
 			 * announcement.  */
-			BGP_ADV_FIFO_ADD(&subgrp->sync->withdraw, &adv->fifo);
+			bgp_adv_fifo_add_tail(&subgrp->sync->withdraw, adv);
 
 			if (trigger_write)
 				subgroup_trigger_write(subgrp);
@@ -716,7 +717,7 @@ void subgroup_default_originate(struct update_subgroup *subgrp, int withdraw)
 	struct bgp_node *rn;
 	struct bgp_path_info *ri;
 	struct peer *peer;
-	int ret = RMAP_DENYMATCH;
+	route_map_result_t ret = RMAP_DENYMATCH;
 	afi_t afi;
 	safi_t safi;
 

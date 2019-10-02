@@ -26,7 +26,7 @@ Configuring OSPF
 
 .. option:: -a, --apiserver
 
-   Enable the OSPF API server
+   Enable the OSPF API server. This is required to use ``ospfclient``.
 
 *ospfd* must acquire interface information from *zebra* in order to function.
 Therefore *zebra* must be running before invoking *ospfd*. Also, if *zebra* is
@@ -69,7 +69,7 @@ The instance number should be specified in the config when addressing a particul
 .. code-block:: frr
 
    router ospf 5
-      router-id 1.2.3.4
+      ospf router-id 1.2.3.4
       area 0.0.0.0 authentication message-digest
       ...
 
@@ -218,7 +218,7 @@ To start OSPF process you have to specify the OSPF router.
    SPF-triggering event occurs within the hold-time of the previous SPF
    calculation.
 
-   This command supercedes the *timers spf* command in previous FRR
+   This command supersedes the *timers spf* command in previous FRR
    releases.
 
 .. index:: max-metric router-lsa [on-startup|on-shutdown] (5-86400)
@@ -906,10 +906,13 @@ Opaque LSA
 .. index:: no capability opaque
 .. clicmd:: no capability opaque
 
-   *ospfd* supports Opaque LSA (:rfc:`2370`) as fundamental for MPLS Traffic
-   Engineering LSA. Prior to used MPLS TE, opaque-lsa must be enable in the
-   configuration file. Alternate command could be "mpls-te on"
-   (:ref:`ospf-traffic-engineering`).
+   *ospfd* supports Opaque LSA (:rfc:`2370`) as partial support for
+   MPLS Traffic Engineering LSAs. The opaque-lsa capability must be
+   enabled in the configuration. An alternate command could be
+   "mpls-te on" (:ref:`ospf-traffic-engineering`). Note that FRR
+   offers only partial support for some of the routing protocol
+   extensions that are used with MPLS-TE; it does not support a
+   complete RSVP-TE solution.
 
 .. index:: show ip ospf database (opaque-link|opaque-area|opaque-external)
 .. clicmd:: show ip ospf database (opaque-link|opaque-area|opaque-external)
@@ -935,6 +938,12 @@ Opaque LSA
 
 Traffic Engineering
 ===================
+
+.. note::
+
+   At this time, FRR offers partial support for some of the routing
+   protocol extensions that can be used with MPLS-TE. FRR does not
+   support a complete RSVP-TE solution currently.
 
 .. index:: mpls-te on
 .. clicmd:: mpls-te on

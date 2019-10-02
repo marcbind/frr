@@ -39,12 +39,14 @@
 #include "lib/if_clippy.c"
 #endif
 
-DEFINE_MTYPE(LIB, IF, "Interface")
+DEFINE_MTYPE_STATIC(LIB, IF, "Interface")
 DEFINE_MTYPE_STATIC(LIB, CONNECTED, "Connected")
 DEFINE_MTYPE_STATIC(LIB, NBR_CONNECTED, "Neighbor Connected")
 DEFINE_MTYPE(LIB, CONNECTED_LABEL, "Connected interface label")
 DEFINE_MTYPE_STATIC(LIB, IF_LINK_PARAMS, "Informational Link Parameters")
 
+static struct interface *if_lookup_by_ifindex(ifindex_t ifindex,
+					      vrf_id_t vrf_id);
 static int if_cmp_func(const struct interface *, const struct interface *);
 static int if_cmp_index_func(const struct interface *ifp1,
 			     const struct interface *ifp2);
@@ -56,8 +58,12 @@ DEFINE_QOBJ_TYPE(interface)
 DEFINE_HOOK(if_add, (struct interface * ifp), (ifp))
 DEFINE_KOOH(if_del, (struct interface * ifp), (ifp))
 
-/* List of interfaces in only the default VRF */
-int ptm_enable = 0;
+struct interface_master{
+	int (*create_hook)(struct interface *ifp);
+	int (*up_hook)(struct interface *ifp);
+	int (*down_hook)(struct interface *ifp);
+	int (*destroy_hook)(struct interface *ifp);
+} ifp_master = { 0, };
 
 /* Compare interface names, returning an integer greater than, equal to, or
  * less than 0, (following the strcmp convention), according to the
@@ -135,18 +141,26 @@ static int if_cmp_index_func(const struct interface *ifp1,
 }
 
 /* Create new interface structure. */
-struct interface *if_create(const char *name, vrf_id_t vrf_id)
+static struct interface *if_create_backend(const char *name, ifindex_t ifindex,
+					   vrf_id_t vrf_id)
 {
 	struct vrf *vrf = vrf_get(vrf_id, NULL);
 	struct interface *ifp;
 
 	ifp = XCALLOC(MTYPE_IF, sizeof(struct interface));
-	ifp->ifindex = IFINDEX_INTERNAL;
-
-	assert(name);
-	strlcpy(ifp->name, name, sizeof(ifp->name));
 	ifp->vrf_id = vrf_id;
-	IFNAME_RB_INSERT(vrf, ifp);
+
+	if (name) {
+		strlcpy(ifp->name, name, sizeof(ifp->name));
+		IFNAME_RB_INSERT(vrf, ifp);
+	} else
+		ifp->name[0] = '\0';
+
+	if (ifindex != IFINDEX_INTERNAL)
+		if_set_index(ifp, ifindex);
+	else
+		ifp->ifindex = ifindex; /* doesn't add it to the list */
+
 	ifp->connected = list_new();
 	ifp->connected->del = (void (*)(void *))connected_free;
 
@@ -159,6 +173,44 @@ struct interface *if_create(const char *name, vrf_id_t vrf_id)
 	QOBJ_REG(ifp, interface);
 	hook_call(if_add, ifp);
 	return ifp;
+}
+
+void if_new_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.create_hook)
+		(*ifp_master.create_hook)(ifp);
+}
+
+void if_destroy_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.destroy_hook)
+		(*ifp_master.destroy_hook)(ifp);
+
+	if_set_index(ifp, IFINDEX_INTERNAL);
+	if (!ifp->configured)
+		if_delete(ifp);
+}
+
+void if_up_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.up_hook)
+		(*ifp_master.up_hook)(ifp);
+}
+
+void if_down_via_zapi(struct interface *ifp)
+{
+	if (ifp_master.down_hook)
+		(*ifp_master.down_hook)(ifp);
+}
+
+struct interface *if_create(const char *name, vrf_id_t vrf_id)
+{
+	return if_create_backend(name, IFINDEX_INTERNAL, vrf_id);
+}
+
+struct interface *if_create_ifindex(ifindex_t ifindex, vrf_id_t vrf_id)
+{
+	return if_create_backend(NULL, ifindex, vrf_id);
 }
 
 /* Create new interface structure. */
@@ -234,14 +286,14 @@ void if_delete(struct interface *ifp)
 
 	if_link_params_free(ifp);
 
-	if (ifp->desc)
-		XFREE(MTYPE_TMP, ifp->desc);
+	XFREE(MTYPE_TMP, ifp->desc);
 
 	XFREE(MTYPE_IF, ifp);
 }
 
-/* Interface existance check by index. */
-struct interface *if_lookup_by_index(ifindex_t ifindex, vrf_id_t vrf_id)
+/* Used only internally to check within VRF only */
+static struct interface *if_lookup_by_ifindex(ifindex_t ifindex,
+					      vrf_id_t vrf_id)
 {
 	struct vrf *vrf;
 	struct interface if_tmp;
@@ -252,6 +304,19 @@ struct interface *if_lookup_by_index(ifindex_t ifindex, vrf_id_t vrf_id)
 
 	if_tmp.ifindex = ifindex;
 	return RB_FIND(if_index_head, &vrf->ifaces_by_index, &if_tmp);
+}
+
+/* Interface existance check by index. */
+struct interface *if_lookup_by_index(ifindex_t ifindex, vrf_id_t vrf_id)
+{
+	switch (vrf_get_backend()) {
+	case VRF_BACKEND_UNKNOWN:
+	case VRF_BACKEND_NETNS:
+		return(if_lookup_by_ifindex(ifindex, vrf_id));
+	case VRF_BACKEND_VRF_LITE:
+		return(if_lookup_by_index_all_vrf(ifindex));
+	}
+	return NULL;
 }
 
 const char *ifindex2ifname(ifindex_t ifindex, vrf_id_t vrf_id)
@@ -303,7 +368,24 @@ struct interface *if_lookup_by_name_all_vrf(const char *name)
 	return NULL;
 }
 
-/* Lookup interface by IPv4 address. */
+struct interface *if_lookup_by_index_all_vrf(ifindex_t ifindex)
+{
+	struct vrf *vrf;
+	struct interface *ifp;
+
+	if (ifindex == IFINDEX_INTERNAL)
+		return NULL;
+
+	RB_FOREACH (vrf, vrf_id_head, &vrfs_by_id) {
+		ifp = if_lookup_by_ifindex(ifindex, vrf->vrf_id);
+		if (ifp)
+			return ifp;
+	}
+
+	return NULL;
+}
+
+/* Lookup interface by IP address. */
 struct interface *if_lookup_exact_address(void *src, int family,
 					  vrf_id_t vrf_id)
 {
@@ -335,7 +417,7 @@ struct interface *if_lookup_exact_address(void *src, int family,
 	return NULL;
 }
 
-/* Lookup interface by IPv4 address. */
+/* Lookup interface by IP address. */
 struct connected *if_lookup_address(void *matchaddr, int family,
 				    vrf_id_t vrf_id)
 {
@@ -390,6 +472,34 @@ struct interface *if_lookup_prefix(struct prefix *prefix, vrf_id_t vrf_id)
 	return NULL;
 }
 
+size_t if_lookup_by_hwaddr(const uint8_t *hw_addr, size_t addrsz,
+			   struct interface ***result, vrf_id_t vrf_id)
+{
+	struct vrf *vrf = vrf_lookup_by_id(vrf_id);
+
+	struct list *rs = list_new();
+	struct interface *ifp;
+
+	FOR_ALL_INTERFACES (vrf, ifp) {
+		if (ifp->hw_addr_len == (int)addrsz
+		    && !memcmp(hw_addr, ifp->hw_addr, addrsz))
+			listnode_add(rs, ifp);
+	}
+
+	if (rs->count) {
+		*result = XCALLOC(MTYPE_TMP,
+				  sizeof(struct interface *) * rs->count);
+		list_to_array(rs, (void **)*result, rs->count);
+	}
+
+	int count = rs->count;
+
+	list_delete(&rs);
+
+	return count;
+}
+
+
 /* Get interface by name if given name interface doesn't exist create
    one. */
 struct interface *if_get_by_name(const char *name, vrf_id_t vrf_id)
@@ -397,6 +507,7 @@ struct interface *if_get_by_name(const char *name, vrf_id_t vrf_id)
 	struct interface *ifp;
 
 	switch (vrf_get_backend()) {
+	case VRF_BACKEND_UNKNOWN:
 	case VRF_BACKEND_NETNS:
 		ifp = if_lookup_by_name(name, vrf_id);
 		if (ifp)
@@ -414,6 +525,34 @@ struct interface *if_get_by_name(const char *name, vrf_id_t vrf_id)
 			return ifp;
 		}
 		return if_create(name, vrf_id);
+	}
+
+	return NULL;
+}
+
+struct interface *if_get_by_ifindex(ifindex_t ifindex, vrf_id_t vrf_id)
+{
+	struct interface *ifp;
+
+	switch (vrf_get_backend()) {
+	case VRF_BACKEND_UNKNOWN:
+	case VRF_BACKEND_NETNS:
+		ifp = if_lookup_by_ifindex(ifindex, vrf_id);
+		if (ifp)
+			return ifp;
+		return if_create_ifindex(ifindex, vrf_id);
+	case VRF_BACKEND_VRF_LITE:
+		ifp = if_lookup_by_index_all_vrf(ifindex);
+		if (ifp) {
+			if (ifp->vrf_id == vrf_id)
+				return ifp;
+			/* If it came from the kernel or by way of zclient,
+			 * believe it and update the ifp accordingly.
+			 */
+			if_update_to_new_vrf(ifp, vrf_id);
+			return ifp;
+		}
+		return if_create_ifindex(ifindex, vrf_id);
 	}
 
 	return NULL;
@@ -439,13 +578,13 @@ void if_set_index(struct interface *ifp, ifindex_t ifindex)
 }
 
 /* Does interface up ? */
-int if_is_up(struct interface *ifp)
+int if_is_up(const struct interface *ifp)
 {
 	return ifp->flags & IFF_UP;
 }
 
 /* Is interface running? */
-int if_is_running(struct interface *ifp)
+int if_is_running(const struct interface *ifp)
 {
 	return ifp->flags & IFF_RUNNING;
 }
@@ -453,7 +592,7 @@ int if_is_running(struct interface *ifp)
 /* Is the interface operative, eg. either UP & RUNNING
    or UP & !ZEBRA_INTERFACE_LINK_DETECTION and
    if ptm checking is enabled, then ptm check has passed */
-int if_is_operative(struct interface *ifp)
+int if_is_operative(const struct interface *ifp)
 {
 	return ((ifp->flags & IFF_UP)
 		&& (((ifp->flags & IFF_RUNNING)
@@ -464,7 +603,7 @@ int if_is_operative(struct interface *ifp)
 
 /* Is the interface operative, eg. either UP & RUNNING
    or UP & !ZEBRA_INTERFACE_LINK_DETECTION, without PTM check */
-int if_is_no_ptm_operative(struct interface *ifp)
+int if_is_no_ptm_operative(const struct interface *ifp)
 {
 	return ((ifp->flags & IFF_UP)
 		&& ((ifp->flags & IFF_RUNNING)
@@ -473,7 +612,7 @@ int if_is_no_ptm_operative(struct interface *ifp)
 }
 
 /* Is this loopback interface ? */
-int if_is_loopback(struct interface *ifp)
+int if_is_loopback(const struct interface *ifp)
 {
 	/* XXX: Do this better, eg what if IFF_WHATEVER means X on platform M
 	 * but Y on platform N?
@@ -482,12 +621,12 @@ int if_is_loopback(struct interface *ifp)
 }
 
 /* Check interface is VRF */
-int if_is_vrf(struct interface *ifp)
+int if_is_vrf(const struct interface *ifp)
 {
 	return CHECK_FLAG(ifp->status, ZEBRA_INTERFACE_VRF_LOOPBACK);
 }
 
-bool if_is_loopback_or_vrf(struct interface *ifp)
+bool if_is_loopback_or_vrf(const struct interface *ifp)
 {
 	if (if_is_loopback(ifp) || if_is_vrf(ifp))
 		return true;
@@ -496,19 +635,19 @@ bool if_is_loopback_or_vrf(struct interface *ifp)
 }
 
 /* Does this interface support broadcast ? */
-int if_is_broadcast(struct interface *ifp)
+int if_is_broadcast(const struct interface *ifp)
 {
 	return ifp->flags & IFF_BROADCAST;
 }
 
 /* Does this interface support broadcast ? */
-int if_is_pointopoint(struct interface *ifp)
+int if_is_pointopoint(const struct interface *ifp)
 {
 	return ifp->flags & IFF_POINTOPOINT;
 }
 
 /* Does this interface support multicast ? */
-int if_is_multicast(struct interface *ifp)
+int if_is_multicast(const struct interface *ifp)
 {
 	return ifp->flags & IFF_MULTICAST;
 }
@@ -522,10 +661,10 @@ const char *if_flag_dump(unsigned long flag)
 #define IFF_OUT_LOG(X, STR)                                                    \
 	if (flag & (X)) {                                                      \
 		if (separator)                                                 \
-			strlcat(logbuf, ",", BUFSIZ);                          \
+			strlcat(logbuf, ",", sizeof(logbuf));                  \
 		else                                                           \
 			separator = 1;                                         \
-		strlcat(logbuf, STR, BUFSIZ);                                  \
+		strlcat(logbuf, STR, sizeof(logbuf));                          \
 	}
 
 	strlcpy(logbuf, "<", BUFSIZ);
@@ -551,7 +690,7 @@ const char *if_flag_dump(unsigned long flag)
 	IFF_OUT_LOG(IFF_IPV4, "IPv4");
 	IFF_OUT_LOG(IFF_IPV6, "IPv6");
 
-	strlcat(logbuf, ">", BUFSIZ);
+	strlcat(logbuf, ">", sizeof(logbuf));
 
 	return logbuf;
 #undef IFF_OUT_LOG
@@ -708,8 +847,7 @@ void connected_free(struct connected *connected)
 	if (connected->destination)
 		prefix_free(connected->destination);
 
-	if (connected->label)
-		XFREE(MTYPE_CONNECTED_LABEL, connected->label);
+	XFREE(MTYPE_CONNECTED_LABEL, connected->label);
 
 	XFREE(MTYPE_CONNECTED, connected);
 }
@@ -875,6 +1013,19 @@ struct connected *connected_add_by_prefix(struct interface *ifp,
 	/* Add connected address to the interface. */
 	listnode_add(ifp->connected, ifc);
 	return ifc;
+}
+
+struct connected *connected_get_linklocal(struct interface *ifp)
+{
+	struct listnode *n;
+	struct connected *c = NULL;
+
+	for (ALL_LIST_ELEMENTS_RO(ifp->connected, n, c)) {
+		if (c->address->family == AF_INET6
+		    && IN6_IS_ADDR_LINKLOCAL(&c->address->u.prefix6))
+			break;
+	}
+	return c;
 }
 
 #if 0  /* this route_table of struct connected's is unused                     \
@@ -1080,7 +1231,7 @@ void if_link_params_free(struct interface *ifp)
  */
 DEFPY_NOSH (interface,
        interface_cmd,
-       "interface IFNAME [vrf NAME$vrfname]",
+       "interface IFNAME [vrf NAME$vrf_name]",
        "Select an interface to configure\n"
        "Interface's name\n"
        VRF_CMD_HELP_STR)
@@ -1090,8 +1241,8 @@ DEFPY_NOSH (interface,
 	struct interface *ifp;
 	int ret;
 
-	if (!vrfname)
-		vrfname = VRF_DEFAULT_NAME;
+	if (!vrf_name)
+		vrf_name = VRF_DEFAULT_NAME;
 
 	/*
 	 * This command requires special handling to maintain backward
@@ -1100,7 +1251,7 @@ DEFPY_NOSH (interface,
 	 * interface is found, then a new one should be created on the default
 	 * VRF.
 	 */
-	VRF_GET_ID(vrf_id, vrfname, false);
+	VRF_GET_ID(vrf_id, vrf_name, false);
 	ifp = if_lookup_by_name_all_vrf(ifname);
 	if (ifp && ifp->vrf_id != vrf_id) {
 		struct vrf *vrf;
@@ -1111,24 +1262,24 @@ DEFPY_NOSH (interface,
 		 */
 		if (vrf_id != VRF_DEFAULT) {
 			vty_out(vty, "%% interface %s not in %s vrf\n", ifname,
-				vrfname);
+				vrf_name);
 			return CMD_WARNING_CONFIG_FAILED;
 		}
 
 		/*
 		 * Special case 2: a VRF name was *not* specified, and the found
 		 * interface is associated to a VRF other than the default one.
-		 * Update vrf_id and vrfname to account for that.
+		 * Update vrf_id and vrf_name to account for that.
 		 */
 		vrf = vrf_lookup_by_id(ifp->vrf_id);
 		assert(vrf);
 		vrf_id = ifp->vrf_id;
-		vrfname = vrf->name;
+		vrf_name = vrf->name;
 	}
 
 	snprintf(xpath_list, sizeof(xpath_list),
 		 "/frr-interface:lib/interface[name='%s'][vrf='%s']", ifname,
-		 vrfname);
+		 vrf_name);
 
 	nb_cli_enqueue_change(vty, ".", NB_OP_CREATE, NULL);
 	ret = nb_cli_apply_changes(vty, xpath_list);
@@ -1151,20 +1302,20 @@ DEFPY_NOSH (interface,
 
 DEFPY (no_interface,
        no_interface_cmd,
-       "no interface IFNAME [vrf NAME$vrfname]",
+       "no interface IFNAME [vrf NAME$vrf_name]",
        NO_STR
        "Delete a pseudo interface's configuration\n"
        "Interface's name\n"
        VRF_CMD_HELP_STR)
 {
-	if (!vrfname)
-		vrfname = VRF_DEFAULT_NAME;
+	if (!vrf_name)
+		vrf_name = VRF_DEFAULT_NAME;
 
 	nb_cli_enqueue_change(vty, ".", NB_OP_DESTROY, NULL);
 
 	return nb_cli_apply_changes(
 		vty, "/frr-interface:lib/interface[name='%s'][vrf='%s']",
-		ifname, vrfname);
+		ifname, vrf_name);
 }
 
 static void cli_show_interface(struct vty *vty, struct lyd_node *dnode,
@@ -1251,6 +1402,17 @@ void if_cmd_init(void)
 	install_element(INTERFACE_NODE, &no_interface_desc_cmd);
 }
 
+void if_zapi_callbacks(int (*create)(struct interface *ifp),
+		       int (*up)(struct interface *ifp),
+		       int (*down)(struct interface *ifp),
+		       int (*destroy)(struct interface *ifp))
+{
+	ifp_master.create_hook = create;
+	ifp_master.up_hook = up;
+	ifp_master.down_hook = down;
+	ifp_master.destroy_hook = destroy;
+}
+
 /* ------- Northbound callbacks ------- */
 
 /*
@@ -1281,6 +1443,11 @@ static int lib_interface_create(enum nb_event event,
 				  vrf->name);
 			return NB_ERR_VALIDATION;
 		}
+
+		/* if VRF is netns or not yet known - init for instance
+		 * then assumption is that passed config is exact
+		 * then the user intent was not to use an other iface
+		 */
 		if (vrf_get_backend() == VRF_BACKEND_VRF_LITE) {
 			ifp = if_lookup_by_name_all_vrf(ifname);
 			if (ifp && ifp->vrf_id != vrf->vrf_id) {
@@ -1302,22 +1469,24 @@ static int lib_interface_create(enum nb_event event,
 #else
 		ifp = if_get_by_name(ifname, vrf->vrf_id);
 #endif /* SUNOS_5 */
-		yang_dnode_set_entry(dnode, ifp);
+
+		ifp->configured = true;
+		nb_running_set_entry(dnode, ifp);
 		break;
 	}
 
 	return NB_OK;
 }
 
-static int lib_interface_delete(enum nb_event event,
-				const struct lyd_node *dnode)
+static int lib_interface_destroy(enum nb_event event,
+				 const struct lyd_node *dnode)
 {
 	struct interface *ifp;
 
-	ifp = yang_dnode_get_entry(dnode, true);
 
 	switch (event) {
 	case NB_EV_VALIDATE:
+		ifp = nb_running_get_entry(dnode, NULL, true);
 		if (CHECK_FLAG(ifp->status, ZEBRA_INTERFACE_ACTIVE)) {
 			zlog_warn("%s: only inactive interfaces can be deleted",
 				  __func__);
@@ -1328,11 +1497,68 @@ static int lib_interface_delete(enum nb_event event,
 	case NB_EV_ABORT:
 		break;
 	case NB_EV_APPLY:
+		ifp = nb_running_unset_entry(dnode);
+
+		ifp->configured = false;
 		if_delete(ifp);
 		break;
 	}
 
 	return NB_OK;
+}
+
+/*
+ * XPath: /frr-interface:lib/interface
+ */
+static const void *lib_interface_get_next(const void *parent_list_entry,
+					  const void *list_entry)
+{
+	struct vrf *vrf;
+	struct interface *pif = (struct interface *)list_entry;
+
+	if (list_entry == NULL) {
+		vrf = RB_MIN(vrf_name_head, &vrfs_by_name);
+		assert(vrf);
+		pif = RB_MIN(if_name_head, &vrf->ifaces_by_name);
+	} else {
+		vrf = vrf_lookup_by_id(pif->vrf_id);
+		pif = RB_NEXT(if_name_head, pif);
+		/* if no more interfaces, switch to next vrf */
+		while (pif == NULL) {
+			vrf = RB_NEXT(vrf_name_head, vrf);
+			if (!vrf)
+				return NULL;
+			pif = RB_MIN(if_name_head, &vrf->ifaces_by_name);
+		}
+	}
+
+	return pif;
+}
+
+static int lib_interface_get_keys(const void *list_entry,
+				  struct yang_list_keys *keys)
+{
+	const struct interface *ifp = list_entry;
+
+	struct vrf *vrf = vrf_lookup_by_id(ifp->vrf_id);
+
+	assert(vrf);
+
+	keys->num = 2;
+	strlcpy(keys->key[0], ifp->name, sizeof(keys->key[0]));
+	strlcpy(keys->key[1], vrf->name, sizeof(keys->key[1]));
+
+	return NB_OK;
+}
+
+static const void *lib_interface_lookup_entry(const void *parent_list_entry,
+					      const struct yang_list_keys *keys)
+{
+	const char *ifname = keys->key[0];
+	const char *vrfname = keys->key[1];
+	struct vrf *vrf = vrf_lookup_by_name(vrfname);
+
+	return if_lookup_by_name(ifname, vrf->vrf_id);
 }
 
 /*
@@ -1348,26 +1574,24 @@ static int lib_interface_description_modify(enum nb_event event,
 	if (event != NB_EV_APPLY)
 		return NB_OK;
 
-	ifp = yang_dnode_get_entry(dnode, true);
-	if (ifp->desc)
-		XFREE(MTYPE_TMP, ifp->desc);
+	ifp = nb_running_get_entry(dnode, NULL, true);
+	XFREE(MTYPE_TMP, ifp->desc);
 	description = yang_dnode_get_string(dnode, NULL);
 	ifp->desc = XSTRDUP(MTYPE_TMP, description);
 
 	return NB_OK;
 }
 
-static int lib_interface_description_delete(enum nb_event event,
-					    const struct lyd_node *dnode)
+static int lib_interface_description_destroy(enum nb_event event,
+					     const struct lyd_node *dnode)
 {
 	struct interface *ifp;
 
 	if (event != NB_EV_APPLY)
 		return NB_OK;
 
-	ifp = yang_dnode_get_entry(dnode, true);
-	if (ifp->desc)
-		XFREE(MTYPE_TMP, ifp->desc);
+	ifp = nb_running_get_entry(dnode, NULL, true);
+	XFREE(MTYPE_TMP, ifp->desc);
 
 	return NB_OK;
 }
@@ -1378,15 +1602,22 @@ const struct frr_yang_module_info frr_interface_info = {
 	.nodes = {
 		{
 			.xpath = "/frr-interface:lib/interface",
-			.cbs.create = lib_interface_create,
-			.cbs.destroy = lib_interface_delete,
-			.cbs.cli_show = cli_show_interface,
+			.cbs = {
+				.create = lib_interface_create,
+				.destroy = lib_interface_destroy,
+				.cli_show = cli_show_interface,
+				.get_next = lib_interface_get_next,
+				.get_keys = lib_interface_get_keys,
+				.lookup_entry = lib_interface_lookup_entry,
+			},
 		},
 		{
 			.xpath = "/frr-interface:lib/interface/description",
-			.cbs.modify = lib_interface_description_modify,
-			.cbs.destroy = lib_interface_description_delete,
-			.cbs.cli_show = cli_show_interface_desc,
+			.cbs = {
+				.modify = lib_interface_description_modify,
+				.destroy = lib_interface_description_destroy,
+				.cli_show = cli_show_interface_desc,
+			},
 		},
 		{
 			.xpath = NULL,

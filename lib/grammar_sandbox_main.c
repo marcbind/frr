@@ -56,8 +56,10 @@ int main(int argc, char **argv)
 	host.name = strdup("test");
 	host.domainname = strdup("testdomainname");
 
-	vty_init(master);
+	vty_init(master, true);
 	memory_init();
+	yang_init();
+	nb_init(master, NULL, 0);
 
 	vty_stdio(vty_do_exit);
 
